@@ -58,8 +58,8 @@ use crate::text_input::{
     Submitted as TextSubmitted, TextInput,
 };
 use crate::transcription_models::{
-    ModelDefinition, ModelRuntime, TranscriptionModelId, TranscriptionSelection, definition,
-    language_name, validate,
+    LiveMode, ModelDefinition, ModelRuntime, TranscriptionModelId, TranscriptionSelection,
+    definition, language_name, validate,
 };
 use crate::transcription_preparation::{PreparationStatus, TranscriptionPreparation};
 
@@ -3460,6 +3460,7 @@ impl AppWindow {
                 this.clear_transcription_error();
                 cx.notify();
             }));
+        let live_settings = self.render_live_settings(transcription_model.live_mode(), cx);
         let double_tap_position = self.double_tap_toggle.render_position(window);
         let release_microphone_position = self.release_microphone_toggle.render_position(window);
         self.double_tap_only_visibility.set_enabled(
@@ -3684,6 +3685,8 @@ impl AppWindow {
                                         .id("dictation-hotkey-setting"),
                                     ),
                             )
+                            .child(settings_section_label("LIVE DICTATION"))
+                            .child(live_settings)
                             .child(settings_section_label("BEHAVIOR"))
                             .child(
                                 settings_panel()
@@ -4209,6 +4212,109 @@ impl AppWindow {
         }) {
             self.double_tap_toggle.set_enabled(enabled);
         }
+    }
+
+    /// The live dictation switch, plus the pass settings when the selected
+    /// model goes live by repeated passes.
+    fn render_live_settings(&self, mode: LiveMode, cx: &mut Context<Self>) -> Div {
+        let enabled = self.settings.live_dictation;
+        let passes = mode == LiveMode::Passes && enabled;
+        let description = match mode {
+            LiveMode::Native => "Native streaming: words paste as the model commits them",
+            LiveMode::Passes => "Repeated passes: words paste once consecutive passes agree",
+            LiveMode::Unavailable => "This model has no live mode; text pastes on release",
+        };
+        let switch = settings_row(
+            "Live dictation",
+            description,
+            toggle(if enabled { 1.0 } else { 0.0 }),
+        );
+        let switch = if passes { switch } else { switch.border_b_0() };
+        let mut panel = settings_panel().child(switch.id("live-dictation-setting").on_click(
+            cx.listener(|this, _, _, cx| {
+                this.update_settings(cx, |settings| {
+                    settings.live_dictation = !settings.live_dictation;
+                });
+            }),
+        ));
+        if !passes {
+            return panel;
+        }
+        let live = self.settings.live_passes;
+        let picker = |id: &'static str,
+                      options: &[(&'static str, u32)],
+                      current: u32,
+                      set: fn(&mut AppSettings, u32),
+                      cx: &mut Context<Self>| {
+            let selected = options.iter().position(|(_, value)| *value == current);
+            let widths = vec![56.0; options.len()];
+            sliding_segmented_control(selected.unwrap_or(0) as f32, &widths).children(
+                options.iter().enumerate().map(|(index, &(label, value))| {
+                    sliding_segmented_item(56.0, selected == Some(index))
+                        .id((id, index))
+                        .text_size(px(10.0))
+                        .child(label)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.update_settings(cx, |settings| set(settings, value));
+                        }))
+                }),
+            )
+        };
+        panel = panel
+            .child(settings_row(
+                "Pass every",
+                "How often recent audio is transcribed again",
+                picker(
+                    "live-interval",
+                    &[
+                        ("200 ms", 200),
+                        ("300 ms", 300),
+                        ("400 ms", 400),
+                        ("500 ms", 500),
+                    ],
+                    live.interval_ms,
+                    |settings, value| settings.live_passes.interval_ms = value,
+                    cx,
+                ),
+            ))
+            .child(settings_row(
+                "Context kept",
+                "Audio before the last pasted word that each pass sees again",
+                picker(
+                    "live-context",
+                    &[
+                        ("4 s", 4_000),
+                        ("6 s", 6_000),
+                        ("8 s", 8_000),
+                        ("12 s", 12_000),
+                        ("16 s", 16_000),
+                    ],
+                    live.context_ms,
+                    |settings, value| settings.live_passes.context_ms = value,
+                    cx,
+                ),
+            ))
+            .child(
+                settings_row(
+                    "Wait after word",
+                    "Audio after a word before it pastes; longer is more accurate",
+                    picker(
+                        "live-hold",
+                        &[
+                            ("0.8 s", 800),
+                            ("1.2 s", 1_200),
+                            ("1.6 s", 1_600),
+                            ("2 s", 2_000),
+                            ("3 s", 3_000),
+                        ],
+                        live.hold_ms,
+                        |settings, value| settings.live_passes.hold_ms = value,
+                        cx,
+                    ),
+                )
+                .border_b_0(),
+            );
+        panel
     }
 
     fn set_double_tap_only(&mut self, enabled: bool, cx: &mut Context<Self>) {

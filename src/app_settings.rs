@@ -13,6 +13,7 @@ use crate::transcription_models::{TranscriptionModelId, TranscriptionSelection};
 static RECORDING_AUDIO_BEHAVIOR: AtomicU8 = AtomicU8::new(0);
 static DOUBLE_TAP_LOCK: AtomicBool = AtomicBool::new(true);
 static LIVE_DICTATION: AtomicBool = AtomicBool::new(true);
+static LIVE_PASSES: OnceLock<RwLock<crate::agreement::LivePasses>> = OnceLock::new();
 static DOUBLE_TAP_ONLY: AtomicBool = AtomicBool::new(false);
 static MICROPHONE_POLICY: AtomicU8 = AtomicU8::new(0);
 static CUSTOM_TRANSFORMATIONS_ENABLED: AtomicBool = AtomicBool::new(false);
@@ -535,6 +536,8 @@ pub struct AppSettings {
     pub double_tap_only: bool,
     /// Paste words while the shortcut is held when the model can stream.
     pub live_dictation: bool,
+    /// How models without native streaming go live.
+    pub live_passes: crate::agreement::LivePasses,
     pub dictation_hotkey: HotkeyBinding,
     #[serde(
         default = "HotkeyBinding::edit_default",
@@ -572,6 +575,7 @@ impl Default for AppSettings {
             double_tap_lock: true,
             double_tap_only: false,
             live_dictation: true,
+            live_passes: crate::agreement::LivePasses::default(),
             dictation_hotkey: HotkeyBinding::default(),
             edit_hotkey: HotkeyBinding::edit_default(),
             paste_last_hotkey: Some(HotkeyBinding::paste_last_default()),
@@ -784,6 +788,10 @@ impl AppSettings {
         RECORDING_AUDIO_BEHAVIOR.store(self.recording_audio_behavior.encoded(), Ordering::Relaxed);
         DOUBLE_TAP_LOCK.store(self.double_tap_lock, Ordering::Relaxed);
         LIVE_DICTATION.store(self.live_dictation, Ordering::Relaxed);
+        *LIVE_PASSES
+            .get_or_init(Default::default)
+            .write()
+            .unwrap_or_else(|error| error.into_inner()) = self.live_passes;
         DOUBLE_TAP_ONLY.store(
             self.double_tap_lock && self.double_tap_only && self.dictation_hotkey.key.is_some(),
             Ordering::Relaxed,
@@ -982,6 +990,13 @@ pub fn double_tap_lock() -> bool {
 
 pub fn live_dictation() -> bool {
     LIVE_DICTATION.load(Ordering::Relaxed)
+}
+
+pub fn live_passes() -> crate::agreement::LivePasses {
+    *LIVE_PASSES
+        .get_or_init(Default::default)
+        .read()
+        .unwrap_or_else(|error| error.into_inner())
 }
 
 pub fn double_tap_only() -> bool {

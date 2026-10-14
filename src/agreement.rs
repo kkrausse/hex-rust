@@ -4,22 +4,42 @@
 //! committed once consecutive passes agree on it and enough audio follows it.
 //! Pure: the caller runs the passes and feeds their words in.
 
+use serde::{Deserialize, Serialize};
+
 /// Two passes place the same word within this distance.
 const SAME_PLACE_MS: i64 = 240;
-/// A word must keep agreeing for this much audio.
-const STABLE_MS: i64 = 500;
-/// And this much audio must follow its end.
-const HOLD_MS: i64 = 1_200;
+/// Consecutive passes that must agree on a word; the hold usually decides.
+const MIN_PASSES: u32 = 2;
 /// A closing full stop can stretch a word across a pause; cap its length.
 const MAX_WORD_MS: i64 = 1_200;
-/// Left context kept before the committed point when the window moves.
-const KEEP_MS: i64 = 4_000;
-/// Window cap: a pass over this much audio commits everything older than
-/// `FULL_TAIL_MS` before its end.
-const MAX_WINDOW_MS: i64 = 12_000;
+/// Window cap beyond the kept context: a pass over context plus this much
+/// audio commits everything older than `FULL_TAIL_MS` before its end.
+const UNCOMMITTED_MAX_MS: i64 = 8_000;
 const FULL_TAIL_MS: i64 = 1_000;
 /// Words carry times on an 80 ms grid.
 const GRID_MS: i64 = 80;
+
+/// The user-tunable part of the rule, stored in settings.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default)]
+pub struct LivePasses {
+    /// A pass starts at most this often.
+    pub interval_ms: u32,
+    /// Audio kept before the committed point when the window moves.
+    pub context_ms: u32,
+    /// Audio that must follow a word's end before it commits.
+    pub hold_ms: u32,
+}
+
+impl Default for LivePasses {
+    fn default() -> Self {
+        Self {
+            interval_ms: 300,
+            context_ms: 4_000,
+            hold_ms: 1_200,
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct TimedWord {
@@ -31,24 +51,31 @@ pub struct TimedWord {
 struct Candidate {
     word: TimedWord,
     passes: u32,
-    since_ms: i64,
 }
 
 #[derive(Default)]
 pub struct Agreement {
+    params: LivePasses,
     committed: Vec<TimedWord>,
     candidates: Vec<Candidate>,
     window_start_ms: i64,
 }
 
 impl Agreement {
+    pub fn new(params: LivePasses) -> Self {
+        Self {
+            params,
+            ..Self::default()
+        }
+    }
+
     /// Where the next pass's audio starts, in ms from the start of capture.
     pub fn window_start_ms(&self) -> i64 {
         self.window_start_ms
     }
 
     pub fn window_full(&self, audio_ms: i64) -> bool {
-        audio_ms - self.window_start_ms >= MAX_WINDOW_MS
+        audio_ms - self.window_start_ms >= self.max_window_ms()
     }
 
     /// Take one pass over `[window_start_ms, audio_ms)`; word times are
@@ -67,12 +94,12 @@ impl Agreement {
             agreed += 1;
         }
         self.candidates.truncate(agreed);
-        self.candidates
-            .extend(fresh.into_iter().skip(agreed).map(|word| Candidate {
-                word,
-                passes: 1,
-                since_ms: audio_ms,
-            }));
+        self.candidates.extend(
+            fresh
+                .into_iter()
+                .skip(agreed)
+                .map(|word| Candidate { word, passes: 1 }),
+        );
 
         let full = self.window_full(audio_ms);
         let ready = self
@@ -86,17 +113,19 @@ impl Agreement {
                     .word
                     .end_ms
                     .min(candidate.word.start_ms + MAX_WORD_MS);
-                candidate.passes >= 2
-                    && audio_ms - candidate.since_ms >= STABLE_MS
-                    && audio_ms - end >= HOLD_MS
+                candidate.passes >= MIN_PASSES && audio_ms - end >= i64::from(self.params.hold_ms)
             })
             .count();
         let newly = self.commit(ready);
         if full && newly.is_empty() {
             // Nothing to cut at: drop the oldest audio rather than stall.
-            self.window_start_ms = audio_ms - MAX_WINDOW_MS + FULL_TAIL_MS;
+            self.window_start_ms = audio_ms - self.max_window_ms() + FULL_TAIL_MS;
         }
         newly
+    }
+
+    fn max_window_ms(&self) -> i64 {
+        i64::from(self.params.context_ms) + UNCOMMITTED_MAX_MS
     }
 
     /// Final pass at release: everything after the committed point commits.
@@ -104,11 +133,7 @@ impl Agreement {
         self.candidates = self
             .after_committed(words)
             .into_iter()
-            .map(|word| Candidate {
-                word,
-                passes: 1,
-                since_ms: 0,
-            })
+            .map(|word| Candidate { word, passes: 1 })
             .collect();
         self.commit(self.candidates.len())
     }
@@ -150,13 +175,13 @@ impl Agreement {
         newly
     }
 
-    /// Start the window up to `KEEP_MS` before the committed point, in the
+    /// Start the window up to `context_ms` before the committed point, in the
     /// widest gap between committed words there, so no pass starts mid-word.
     fn move_window(&mut self) {
         let Some(last) = self.committed.last() else {
             return;
         };
-        let earliest = last.end_ms - KEEP_MS;
+        let earliest = last.end_ms - i64::from(self.params.context_ms);
         let gap = self
             .committed
             .windows(2)
@@ -203,14 +228,14 @@ mod tests {
     }
 
     #[test]
-    fn commits_only_words_two_passes_agree_on_after_the_hold() {
+    fn commits_only_words_passes_agree_on_after_the_hold() {
         let mut agreement = Agreement::default();
         assert!(
             agreement
                 .pass(words(&[("hello", 0), ("world", 900)]), 1_000)
                 .is_empty()
         );
-        // Same words a frame later, but not yet stable for 0.5 s.
+        // Same words a frame later, but too little audio after them yet.
         assert!(
             agreement
                 .pass(words(&[("Hello,", 80), ("world", 900)]), 1_250)
@@ -235,6 +260,7 @@ mod tests {
     fn a_shifted_last_word_is_not_committed_twice() {
         let mut agreement = Agreement::default();
         agreement.pass(words(&[("send", 0), ("numbers", 400)]), 1_000);
+        agreement.pass(words(&[("send", 0), ("numbers", 400)]), 1_500);
         agreement.pass(words(&[("send", 0), ("numbers", 400)]), 2_000);
         // After the window moved, "numbers" comes back 400 ms later.
         let rest = agreement.finish(words(&[("numbers", 800), ("today", 1_200)]));
@@ -245,6 +271,7 @@ mod tests {
     fn finish_commits_the_rest_after_the_committed_point() {
         let mut agreement = Agreement::default();
         agreement.pass(words(&[("one", 0), ("two", 400)]), 1_000);
+        agreement.pass(words(&[("one", 0), ("two", 400)]), 1_500);
         agreement.pass(words(&[("one", 0), ("two", 400)]), 2_000);
         let rest = agreement.finish(words(&[("one", 80), ("two", 400), ("three", 2_100)]));
         assert_eq!(texts(&rest), ["three"]);
@@ -255,6 +282,7 @@ mod tests {
         let mut agreement = Agreement::default();
         let spoken = words(&[("a", 0), ("b", 400), ("c", 3_000), ("d", 6_000)]);
         agreement.pass(spoken.clone(), 7_000);
+        agreement.pass(spoken.clone(), 7_500);
         agreement.pass(spoken, 8_000);
         // Widest gap within 4 s of d's end: c (ends 3.3 s) to d (6 s).
         assert_eq!(agreement.window_start_ms(), 4_640);

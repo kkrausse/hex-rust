@@ -158,8 +158,7 @@ struct LiveJob {
 /// Matches the trailing context batch Unified English gets in `transcription`.
 const LIVE_TRAILING_SILENCE_SAMPLES: usize = 3_200;
 const LIVE_POLL_INTERVAL: Duration = Duration::from_millis(30);
-/// Agreement passes start at most this often, and only after this much new audio.
-const AGREEMENT_PASS_INTERVAL: Duration = Duration::from_millis(250);
+/// An agreement pass needs at least this much new audio.
 const AGREEMENT_MIN_NEW_SAMPLES: usize = 1_600;
 
 struct ProcessorJob {
@@ -956,7 +955,9 @@ fn run_live_job(
             None => match transcriber.agreement_model() {
                 Some(model) => {
                     let mut samples = Vec::<f32>::new();
-                    let mut agreement = Agreement::default();
+                    let params = crate::app_settings::live_passes();
+                    let pass_interval = Duration::from_millis(params.interval_ms.into());
+                    let mut agreement = Agreement::new(params);
                     let mut committed = String::new();
                     let mut last_pass = (Instant::now(), 0usize);
                     let mut passes = 0u32;
@@ -978,7 +979,7 @@ fn run_live_job(
                     };
                     wait_for_end(&mut |chunk| {
                         samples.extend_from_slice(chunk);
-                        if last_pass.0.elapsed() < AGREEMENT_PASS_INTERVAL
+                        if last_pass.0.elapsed() < pass_interval
                             || samples.len() - last_pass.1 < AGREEMENT_MIN_NEW_SAMPLES
                         {
                             return Ok(());
@@ -1460,7 +1461,12 @@ impl Parakeet {
         samples: &[f32],
         offset_ms: i64,
     ) -> Result<Vec<TimedWord>> {
-        let mut samples = samples.to_vec();
+        // Past the model's input limit, keep the newest audio.
+        let skip = self
+            .max_audio_samples
+            .map_or(0, |maximum| samples.len().saturating_sub(maximum));
+        let offset_ms = offset_ms + (skip / TRANSCRIPTION_SAMPLES_PER_MS) as i64;
+        let mut samples = samples[skip..].to_vec();
         pad_for_parakeet(&mut samples);
         Ok(self
             .transcribe_segments(&samples)?

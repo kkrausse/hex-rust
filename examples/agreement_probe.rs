@@ -1,5 +1,5 @@
 //! Replay a 16 kHz mono WAV through the agreement engine on a virtual clock:
-//! a pass every 250 ms of audio, as live dictation runs it. Prints each commit
+//! a pass every 300 ms of audio, as live dictation runs it. Prints each commit
 //! with the audio time it appeared at, and the final pass time after release.
 //!
 //!     cargo run --release --example agreement_probe -- model.gguf audio.wav
@@ -53,7 +53,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     pass(&pcm[..16_000], 0)?; // warm up
     let mut agreement = Agreement::default();
     let mut times = Vec::new();
-    for end in (4_000..=pcm.len()).step_by(4_000) {
+    for end in (4_000..=pcm.len()).step_by(4_800) {
         let start = (agreement.window_start_ms() as usize * 16).min(end);
         let (words, ms) = pass(&pcm[start..end], agreement.window_start_ms())?;
         times.push(ms);

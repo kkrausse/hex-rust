@@ -168,7 +168,29 @@ pub struct GgufArtifact {
     pub variant: &'static str,
 }
 
+/// How a model pastes while the shortcut is held. Runtime capabilities
+/// still decide; this names the expected mode for Settings.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LiveMode {
+    /// The model streams natively (transcribe.cpp stream).
+    Native,
+    /// Repeated passes over recent audio, committed by agreement.
+    Passes,
+    /// No word times: text pastes on release.
+    Unavailable,
+}
+
 impl ModelDefinition {
+    pub const fn live_mode(&self) -> LiveMode {
+        match self.id {
+            TranscriptionModelId::ParakeetUnifiedEnglish => LiveMode::Native,
+            TranscriptionModelId::ParakeetTdtCtc110m
+            | TranscriptionModelId::ParakeetV2
+            | TranscriptionModelId::ParakeetV3 => LiveMode::Passes,
+            _ => LiveMode::Unavailable,
+        }
+    }
+
     pub const fn available(&self) -> bool {
         !matches!(self.runtime, ModelRuntime::AppleSpeech)
     }
