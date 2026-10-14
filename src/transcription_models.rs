@@ -18,6 +18,8 @@ pub enum TranscriptionModelId {
     #[default]
     #[serde(rename = "parakeet_unified_en")]
     ParakeetUnifiedEnglish,
+    #[serde(rename = "parakeet_tdt_ctc_110m")]
+    ParakeetTdtCtc110m,
     ParakeetV2,
     ParakeetV3,
     WhisperLargeV3Turbo,
@@ -31,6 +33,7 @@ impl TranscriptionModelId {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::ParakeetUnifiedEnglish => "parakeet_unified_en",
+            Self::ParakeetTdtCtc110m => "parakeet_tdt_ctc_110m",
             Self::ParakeetV2 => "parakeet_v2",
             Self::ParakeetV3 => "parakeet_v3",
             Self::WhisperLargeV3Turbo => "whisper_large_v3_turbo",
@@ -48,6 +51,7 @@ impl FromStr for TranscriptionModelId {
     fn from_str(value: &str) -> Result<Self> {
         match value {
             "parakeet_unified_en" => Ok(Self::ParakeetUnifiedEnglish),
+            "parakeet_tdt_ctc_110m" => Ok(Self::ParakeetTdtCtc110m),
             "parakeet_v2" => Ok(Self::ParakeetV2),
             "parakeet_v3" => Ok(Self::ParakeetV3),
             "whisper_large_v3_turbo" => Ok(Self::WhisperLargeV3Turbo),
@@ -256,6 +260,15 @@ const PARAKEET_UNIFIED_ENGLISH_ARTIFACT: GgufArtifact = GgufArtifact {
     architecture: "parakeet",
     variant: "unified-en-0.6b",
 };
+const PARAKEET_TDT_CTC_110M_ARTIFACT: GgufArtifact = GgufArtifact {
+    filename: "parakeet-tdt_ctc-110m-Q4_K_M.gguf",
+    revision: "766f172fe70eb66785e3371664f53762e0fbafaa",
+    repository: "handy-computer/parakeet-tdt_ctc-110m-gguf",
+    bytes: 89_989_600,
+    sha256: "486414fd90185a8c8a4ced7c123cfb133ff4f7958426c6b8bd9049946b56b448",
+    architecture: "parakeet",
+    variant: "tdt_ctc-110m",
+};
 const PARAKEET_V3_ARTIFACT: GgufArtifact = GgufArtifact {
     filename: "parakeet-tdt-0.6b-v3-Q8_0.gguf",
     revision: "85ac09ea12fc4b1112fa76810059364bc6adc9de",
@@ -314,6 +327,20 @@ pub const MODELS: &[ModelDefinition] = &[
         runtime: ModelRuntime::Gguf(&PARAKEET_UNIFIED_ENGLISH_ARTIFACT),
         languages: &["en"],
         accepts_language_hint: true,
+        supports_language_detection: false,
+        supports_recognition_hints: false,
+    },
+    ModelDefinition {
+        id: TranscriptionModelId::ParakeetTdtCtc110m,
+        name: "Parakeet 110M",
+        realtime: "~31x",
+        quality: "Unmeasured",
+        quality_context: "English, no live streaming",
+        coverage: "English",
+        timestamps: "Token timestamps",
+        runtime: ModelRuntime::Gguf(&PARAKEET_TDT_CTC_110M_ARTIFACT),
+        languages: &["en"],
+        accepts_language_hint: false,
         supports_language_detection: false,
         supports_recognition_hints: false,
     },
@@ -509,6 +536,10 @@ pub(crate) fn choices_for_runtime(language: &str) -> Vec<ModelChoice> {
             choice(
                 TranscriptionModelId::WhisperLargeV3Turbo,
                 Recommendation::RecognitionHints,
+            ),
+            choice(
+                TranscriptionModelId::ParakeetTdtCtc110m,
+                Recommendation::Fastest,
             ),
         ],
         "zh" | "yue" | "ja" | "ko" => vec![
@@ -1030,6 +1061,10 @@ mod tests {
             (
                 TranscriptionModelId::ParakeetUnifiedEnglish,
                 "parakeet_unified_en",
+            ),
+            (
+                TranscriptionModelId::ParakeetTdtCtc110m,
+                "parakeet_tdt_ctc_110m",
             ),
             (TranscriptionModelId::ParakeetV2, "parakeet_v2"),
             (TranscriptionModelId::ParakeetV3, "parakeet_v3"),
