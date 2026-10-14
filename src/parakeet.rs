@@ -13,6 +13,7 @@ use transcribe_cpp::{
     WhisperRunOptions, sys::TRANSCRIBE_EXT_KIND_WHISPER_RUN,
 };
 
+use crate::agreement::{Agreement, TimedWord};
 use crate::context::ContextSnapshot;
 use crate::dictation::{DictationClip, DictationProtocol, pad_for_parakeet};
 use crate::dictation_processor::ProcessingObservation;
@@ -157,6 +158,9 @@ struct LiveJob {
 /// Matches the trailing context batch Unified English gets in `transcription`.
 const LIVE_TRAILING_SILENCE_SAMPLES: usize = 3_200;
 const LIVE_POLL_INTERVAL: Duration = Duration::from_millis(30);
+/// Agreement passes start at most this often, and only after this much new audio.
+const AGREEMENT_PASS_INTERVAL: Duration = Duration::from_millis(250);
+const AGREEMENT_MIN_NEW_SAMPLES: usize = 1_600;
 
 struct ProcessorJob {
     job_id: DictationJobId,
@@ -949,22 +953,76 @@ fn run_live_job(
                     Ok(end)
                 })
                 .map_err(|error| error.to_string()),
-            None => {
-                tracing::info!("selected model cannot stream; live dictation uses batch");
-                let mut samples = Vec::new();
-                wait_for_end(&mut |chunk| {
-                    samples.extend_from_slice(chunk);
-                    Ok(())
-                })
-                .and_then(|end| {
-                    if end == LiveEnd::Finished {
-                        let text = transcriber.transcribe(std::mem::take(&mut samples))?;
-                        release(text.trim(), true, &mut inserted);
-                    }
-                    Ok(end)
-                })
-                .map_err(|error| error.to_string())
-            }
+            None => match transcriber.agreement_model() {
+                Some(model) => {
+                    let mut samples = Vec::<f32>::new();
+                    let mut agreement = Agreement::default();
+                    let mut committed = String::new();
+                    let mut last_pass = (Instant::now(), 0usize);
+                    let mut passes = 0u32;
+                    let window_pass = |model: &mut Parakeet,
+                                       samples: &[f32],
+                                       agreement: &Agreement|
+                     -> Result<Vec<TimedWord>> {
+                        let start_ms = agreement.window_start_ms();
+                        let start = (start_ms as usize * 16).min(samples.len());
+                        model.transcribe_words(&samples[start..], start_ms)
+                    };
+                    let push = |committed: &mut String, words: Vec<TimedWord>| {
+                        for word in words {
+                            if !committed.is_empty() {
+                                committed.push(' ');
+                            }
+                            committed.push_str(&word.text);
+                        }
+                    };
+                    wait_for_end(&mut |chunk| {
+                        samples.extend_from_slice(chunk);
+                        if last_pass.0.elapsed() < AGREEMENT_PASS_INTERVAL
+                            || samples.len() - last_pass.1 < AGREEMENT_MIN_NEW_SAMPLES
+                        {
+                            return Ok(());
+                        }
+                        last_pass = (Instant::now(), samples.len());
+                        passes += 1;
+                        let words = window_pass(model, &samples, &agreement)?;
+                        let audio_ms = (samples.len() / 16) as i64;
+                        push(&mut committed, agreement.pass(words, audio_ms));
+                        if !committed.is_empty() {
+                            release(&format!("{committed} "), false, &mut inserted);
+                        }
+                        Ok(())
+                    })
+                    .and_then(|end| {
+                        if end == LiveEnd::Finished {
+                            samples.extend_from_slice(&[0.0; LIVE_TRAILING_SILENCE_SAMPLES]);
+                            passes += 1;
+                            let words = window_pass(model, &samples, &agreement)?;
+                            push(&mut committed, agreement.finish(words));
+                            release(&committed, true, &mut inserted);
+                        }
+                        tracing::info!(passes, "agreement dictation ended");
+                        Ok(end)
+                    })
+                    .map_err(|error| error.to_string())
+                }
+                None => {
+                    tracing::info!("selected model cannot stream; live dictation uses batch");
+                    let mut samples = Vec::new();
+                    wait_for_end(&mut |chunk| {
+                        samples.extend_from_slice(chunk);
+                        Ok(())
+                    })
+                    .and_then(|end| {
+                        if end == LiveEnd::Finished {
+                            let text = transcriber.transcribe(std::mem::take(&mut samples))?;
+                            release(text.trim(), true, &mut inserted);
+                        }
+                        Ok(end)
+                    })
+                    .map_err(|error| error.to_string())
+                }
+            },
         },
     };
     let finished_at = ended_at.unwrap_or_else(Instant::now);
@@ -1389,6 +1447,32 @@ impl Parakeet {
         self.session
             .stream(&options, live)
             .wrap_err("could not start live transcription")?
+    }
+
+    pub(crate) fn has_word_times(&self) -> bool {
+        self.options.timestamps == TimestampKind::Word
+    }
+
+    /// Transcribe `samples` and return its words with times shifted by
+    /// `offset_ms`, for the agreement engine.
+    pub(crate) fn transcribe_words(
+        &mut self,
+        samples: &[f32],
+        offset_ms: i64,
+    ) -> Result<Vec<TimedWord>> {
+        let mut samples = samples.to_vec();
+        pad_for_parakeet(&mut samples);
+        Ok(self
+            .transcribe_segments(&samples)?
+            .words
+            .into_iter()
+            .filter(|word| !word.text.trim().is_empty())
+            .map(|word| TimedWord {
+                text: word.text.trim().to_string(),
+                start_ms: word.t0_ms + offset_ms,
+                end_ms: word.t1_ms + offset_ms,
+            })
+            .collect())
     }
 
     pub(crate) fn model_id(&self) -> Option<TranscriptionModelId> {

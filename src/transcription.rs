@@ -95,6 +95,17 @@ impl Transcriber {
         }
     }
 
+    /// A model without native streaming that can still go live by agreement
+    /// between repeated passes, which needs word times.
+    pub fn agreement_model(&mut self) -> Option<&mut Parakeet> {
+        match self {
+            Self::Gguf(model) if !model.supports_streaming() && model.has_word_times() => {
+                Some(model)
+            }
+            _ => None,
+        }
+    }
+
     /// Transcribe one normalized segment with the same input preparation as
     /// plain dictation. The caller retains ownership of segment offsets.
     pub fn transcribe_segments(&mut self, mut samples: Vec<f32>) -> Result<Transcript> {
@@ -133,7 +144,10 @@ fn prepare_gguf_samples(samples: &mut Vec<f32>, model: Option<TranscriptionModel
 
 impl WarmTranscriber {
     pub fn supports_streaming(&self) -> bool {
-        matches!(&self.active, Some(Transcriber::Gguf(model)) if model.supports_streaming())
+        matches!(
+            &self.active,
+            Some(Transcriber::Gguf(model)) if model.supports_streaming() || model.has_word_times()
+        )
     }
 
     pub fn load() -> Result<Self> {

@@ -1,5 +1,7 @@
 #[cfg(target_os = "macos")]
 mod accessibility;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+mod agreement;
 mod app_paths;
 #[cfg(target_os = "macos")]
 mod app_settings;
