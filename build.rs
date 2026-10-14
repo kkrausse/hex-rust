@@ -29,6 +29,11 @@ fn main() {
         );
         println!("cargo:rustc-link-arg=-Wl,-rpath,{swift_runtime}");
     }
+    // Command Line Tools keep the Swift compatibility archives outside a toolchain.
+    println!(
+        "cargo:rustc-link-search={}/usr/lib/swift/macosx",
+        developer_dir.trim()
+    );
 }
 
 fn compile_permission_guide() {
@@ -89,6 +94,18 @@ fn compile_indicator_shader() {
     let air = output_dir.join("dictation_indicator.air");
     let library = output_dir.join("dictation_indicator.metallib");
     println!("cargo:rerun-if-changed={}", source.display());
+    println!("cargo::rustc-check-cfg=cfg(hex_runtime_indicator_shader)");
+
+    // Command Line Tools ship no Metal compiler; compile the source at runtime.
+    let has_metal = Command::new("xcrun")
+        .args(["--sdk", "macosx", "-f", "metal"])
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if !has_metal {
+        println!("cargo:warning=xcrun metal unavailable; indicator shader compiles at runtime");
+        println!("cargo:rustc-cfg=hex_runtime_indicator_shader");
+        return;
+    }
 
     let metal = Command::new("xcrun")
         .args(["--sdk", "macosx", "metal", "-c"])

@@ -10,6 +10,7 @@ use color_eyre::eyre::{Result, eyre};
 
 use crate::audio::{CaptureInstant, RecoveringAudioInput, RecoveringAudioInputEvent};
 use crate::dictation::{DictationCapture, Finish};
+use crate::parakeet::LiveTap;
 use crate::recording_environment::RecordingEnvironmentController;
 use crate::suppression::PendingInputEvents;
 
@@ -99,6 +100,7 @@ enum Command {
     Start {
         at: CaptureInstant,
         kind: CaptureKind,
+        live: Option<LiveTap>,
         reply: SyncSender<bool>,
     },
     BecomeIntentional {
@@ -141,6 +143,9 @@ struct Owner {
     recognition_overflowed: bool,
     pending_input: PendingInputEvents,
     last_captured_through: Option<CaptureInstant>,
+    /// Receives the current capture's audio while it records. Ended (finished
+    /// or cancelled) exactly when that capture ends, by whatever path.
+    live: Option<LiveTap>,
 }
 
 #[derive(Clone, Copy)]
@@ -276,11 +281,16 @@ impl DictationAudio {
     }
 
     pub fn start(&self, at: CaptureInstant) -> Result<bool> {
-        self.start_capture(at, CaptureKind::Hotkey)
+        self.start_capture(at, CaptureKind::Hotkey, None)
+    }
+
+    /// Start a hotkey capture whose audio also streams into `live`.
+    pub fn start_live(&self, at: CaptureInstant, live: LiveTap) -> Result<bool> {
+        self.start_capture(at, CaptureKind::Hotkey, Some(live))
     }
 
     pub fn start_programmatic(&self, at: CaptureInstant) -> Result<()> {
-        if self.start_capture(at, CaptureKind::Programmatic)? {
+        if self.start_capture(at, CaptureKind::Programmatic, None)? {
             Ok(())
         } else {
             Err(eyre!("microphone-unavailable"))
@@ -293,11 +303,22 @@ impl DictationAudio {
             CaptureKind::Voice {
                 recognition_generation,
             },
+            None,
         )
     }
 
-    fn start_capture(&self, at: CaptureInstant, kind: CaptureKind) -> Result<bool> {
-        self.call(|reply| Command::Start { at, kind, reply })
+    fn start_capture(
+        &self,
+        at: CaptureInstant,
+        kind: CaptureKind,
+        live: Option<LiveTap>,
+    ) -> Result<bool> {
+        self.call(|reply| Command::Start {
+            at,
+            kind,
+            live,
+            reply,
+        })
     }
 
     pub fn become_intentional(&self, at: CaptureInstant) -> Result<bool> {
@@ -419,6 +440,7 @@ impl Owner {
             recognition_overflowed: false,
             pending_input,
             last_captured_through: None,
+            live: None,
         };
         let audio = DictationAudio {
             commands: command_sender,
@@ -461,13 +483,20 @@ impl Owner {
 
     fn handle(&mut self, command: Command) -> bool {
         match command {
-            Command::Start { at, kind, reply } => {
+            Command::Start {
+                at,
+                kind,
+                live,
+                reply,
+            } => {
+                self.end_live(false);
                 // Draining can discover a failure belonging to the previous capture or idle
                 // period. Validate and advance the new capture only after that drain.
                 if self.input.is_open() && !self.input.is_recovering() {
                     self.drain_through(at);
                 }
                 if self.input.is_recovering() {
+                    live.inspect(LiveTap::cancel);
                     let _ = reply.send(false);
                     return true;
                 }
@@ -478,6 +507,7 @@ impl Owner {
                     if recognition_generation != self.recognition_generation()
                         || self.pending_input.oldest().is_some()
                     {
+                        live.inspect(LiveTap::cancel);
                         let _ = reply.send(false);
                         return true;
                     }
@@ -494,6 +524,7 @@ impl Owner {
                     });
                     self.input.request_open();
                 }
+                self.live = live;
                 self.state.recording.store(true, Ordering::Release);
                 let _ = reply.send(true);
             }
@@ -513,8 +544,10 @@ impl Owner {
                     Finish::Discard
                 } else {
                     self.drain_through(at);
+                    self.feed_live();
                     self.capture.finish(at)
                 };
+                self.end_live(matches!(finish, Finish::Transcribe(_)));
                 self.state.recording.store(false, Ordering::Release);
                 let _ = reply.send(finish);
             }
@@ -524,6 +557,7 @@ impl Owner {
                     self.input.cancel_open();
                 }
                 self.capture.cancel();
+                self.end_live(false);
                 self.state.recording.store(false, Ordering::Release);
                 let _ = reply.send(());
             }
@@ -590,6 +624,7 @@ impl Owner {
                     let was_recording = self.capture.is_recording();
                     let capture_generation = self.state.capture_generation.load(Ordering::Acquire);
                     self.capture = new_capture(self.sample_rate(), &self.recording_environment);
+                    self.end_live(false);
                     self.state.recording.store(false, Ordering::Release);
                     self.next_recognition_generation();
                     let _ = self.events.send(DictationAudioEvent::CaptureDiscontinuity {
@@ -607,6 +642,7 @@ impl Owner {
                     captured_through,
                     self.pending_input.oldest(),
                 );
+                self.feed_live();
                 self.forward_recognition(samples, captured_through);
             }
             RecoveringAudioInputEvent::Timeout => {}
@@ -616,6 +652,7 @@ impl Owner {
                 let was_recording = self.capture.is_recording();
                 let capture_generation = self.state.capture_generation.load(Ordering::Acquire);
                 self.capture.cancel();
+                self.end_live(false);
                 self.state.recording.store(false, Ordering::Release);
                 self.state.recovering.store(true, Ordering::Release);
                 let _ = self.events.send(DictationAudioEvent::Interrupted {
@@ -654,6 +691,7 @@ impl Owner {
                         });
                     }
                 } else {
+                    self.end_live(false);
                     self.state.recording.store(false, Ordering::Release);
                     if self.release_while_idle {
                         self.close_input();
@@ -663,6 +701,9 @@ impl Owner {
             }
             RecoveringAudioInputEvent::OpenFailed(error) => {
                 let was_recording = self.pending_capture.take().is_some();
+                if was_recording {
+                    self.end_live(false);
+                }
                 self.state.recording.store(false, Ordering::Release);
                 self.reconcile_input();
                 if was_recording {
@@ -671,6 +712,25 @@ impl Owner {
                         error,
                     });
                 }
+            }
+        }
+    }
+
+    fn feed_live(&mut self) {
+        if let Some(live) = &self.live {
+            let samples = self.capture.take_live_samples();
+            if !samples.is_empty() {
+                live.push(&samples);
+            }
+        }
+    }
+
+    fn end_live(&mut self, finished: bool) {
+        if let Some(live) = self.live.take() {
+            if finished {
+                live.finish();
+            } else {
+                live.cancel();
             }
         }
     }
@@ -823,6 +883,7 @@ mod tests {
         assert!(control(owner, |reply| Command::Start {
             at,
             kind: CaptureKind::Hotkey,
+            live: None,
             reply,
         }));
     }
@@ -1093,6 +1154,7 @@ mod tests {
                         recognition_generation: input.recognition_generation(),
                     }
                 },
+                live: None,
                 reply,
             }));
             assert_eq!(input.capture_generation(), generation);

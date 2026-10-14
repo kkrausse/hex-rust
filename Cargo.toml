@@ -15,6 +15,8 @@ cc = "1"
 
 [features]
 onnx-benchmark = ["dep:transcribe-rs"]
+# Builds without Xcode's Metal compiler by compiling gpui shaders at runtime.
+runtime-shaders = ["gpui/runtime_shaders"]
 
 [profile.moonshine-lab]
 inherits = "release"

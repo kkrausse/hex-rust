@@ -496,12 +496,20 @@ impl MetalRenderer {
             f64::from(WINDOW_HEIGHT * 2.0),
         ));
 
+        #[cfg(not(hex_runtime_indicator_shader))]
         let library = device
             .new_library_with_data(include_bytes!(concat!(
                 env!("OUT_DIR"),
                 "/dictation_indicator.metallib"
             )))
             .map_err(|error| format!("could not load indicator shader: {error}"))?;
+        #[cfg(hex_runtime_indicator_shader)]
+        let library = device
+            .new_library_with_source(
+                include_str!("dictation_indicator.metal"),
+                &metal::CompileOptions::new(),
+            )
+            .map_err(|error| format!("could not compile indicator shader: {error}"))?;
         let vertex = library
             .get_function("indicator_vertex", None)
             .map_err(|error| format!("could not load indicator vertex shader: {error}"))?;

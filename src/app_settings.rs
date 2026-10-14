@@ -12,6 +12,7 @@ use crate::transcription_models::{TranscriptionModelId, TranscriptionSelection};
 
 static RECORDING_AUDIO_BEHAVIOR: AtomicU8 = AtomicU8::new(0);
 static DOUBLE_TAP_LOCK: AtomicBool = AtomicBool::new(true);
+static LIVE_DICTATION: AtomicBool = AtomicBool::new(true);
 static DOUBLE_TAP_ONLY: AtomicBool = AtomicBool::new(false);
 static MICROPHONE_POLICY: AtomicU8 = AtomicU8::new(0);
 static CUSTOM_TRANSFORMATIONS_ENABLED: AtomicBool = AtomicBool::new(false);
@@ -532,6 +533,8 @@ pub struct AppSettings {
     pub recording_audio_behavior: RecordingAudioBehavior,
     pub double_tap_lock: bool,
     pub double_tap_only: bool,
+    /// Paste words while the shortcut is held when the model can stream.
+    pub live_dictation: bool,
     pub dictation_hotkey: HotkeyBinding,
     #[serde(
         default = "HotkeyBinding::edit_default",
@@ -568,6 +571,7 @@ impl Default for AppSettings {
             recording_audio_behavior: RecordingAudioBehavior::DoNothing,
             double_tap_lock: true,
             double_tap_only: false,
+            live_dictation: true,
             dictation_hotkey: HotkeyBinding::default(),
             edit_hotkey: HotkeyBinding::edit_default(),
             paste_last_hotkey: Some(HotkeyBinding::paste_last_default()),
@@ -779,6 +783,7 @@ impl AppSettings {
         crate::feedback::set_volume(self.sound_effect_volume.clamp(0.0, 1.0));
         RECORDING_AUDIO_BEHAVIOR.store(self.recording_audio_behavior.encoded(), Ordering::Relaxed);
         DOUBLE_TAP_LOCK.store(self.double_tap_lock, Ordering::Relaxed);
+        LIVE_DICTATION.store(self.live_dictation, Ordering::Relaxed);
         DOUBLE_TAP_ONLY.store(
             self.double_tap_lock && self.double_tap_only && self.dictation_hotkey.key.is_some(),
             Ordering::Relaxed,
@@ -973,6 +978,10 @@ pub fn custom_transformations_enabled() -> bool {
 
 pub fn double_tap_lock() -> bool {
     DOUBLE_TAP_LOCK.load(Ordering::Relaxed)
+}
+
+pub fn live_dictation() -> bool {
+    LIVE_DICTATION.load(Ordering::Relaxed)
 }
 
 pub fn double_tap_only() -> bool {

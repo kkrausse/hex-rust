@@ -380,6 +380,8 @@ struct Recording {
     source_samples: usize,
     source_rate: u32,
     recorded_through: Option<CaptureInstant>,
+    /// Prefix of `samples` already handed to live transcription.
+    live_taken: usize,
     input_buffer: Vec<f32>,
     resampler: Option<Fft<f32>>,
     #[cfg(target_os = "macos")]
@@ -438,6 +440,7 @@ impl Recording {
             source_samples: 0,
             source_rate,
             recorded_through: None,
+            live_taken: 0,
             input_buffer: Vec::with_capacity(Self::CHUNK_SIZE),
             resampler,
             #[cfg(target_os = "macos")]
@@ -679,6 +682,21 @@ impl DictationCapture {
 
     pub fn cancel(&mut self) {
         self.recording = None;
+    }
+
+    /// 16 kHz samples recorded since the previous call. Nothing is released
+    /// before the hold becomes intentional, so a short tap never reaches live
+    /// transcription. Includes the resampler's leading delay, which `finish`
+    /// trims from the clip; for streaming it is a few ms of leading silence.
+    pub fn take_live_samples(&mut self) -> Vec<f32> {
+        match &mut self.recording {
+            Some(recording) if recording.intentional => {
+                let samples = recording.samples[recording.live_taken..].to_vec();
+                recording.live_taken = recording.samples.len();
+                samples
+            }
+            _ => Vec::new(),
+        }
     }
 
     pub fn finish(&mut self, now: CaptureInstant) -> Finish {

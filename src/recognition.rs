@@ -1544,11 +1544,15 @@ fn handle_hotkey_action(
 ) -> Result<bool> {
     match action {
         HotkeyAction::Start => {
-            if !dictation.start(action_at)? {
+            worker.prepare_paste();
+            let accepted = match worker.begin_live(context) {
+                Some(live) => dictation.start_live(action_at, live)?,
+                None => dictation.start(action_at)?,
+            };
+            if !accepted {
                 return Ok(false);
             }
             reset_command_recognizer(dictation, recognizer)?;
-            worker.prepare_paste();
             events.dictation(DictationPhase::Started, "")?;
             if let Some(indicator) = indicator {
                 indicator.send(DictationIndicatorEvent::Started);
@@ -2086,7 +2090,14 @@ fn finish_dictation(
         device: device.into(),
     })?;
     events.dictation(DictationPhase::Transcribing, "")?;
-    match worker.transcribe(clip, target, protocol, context.clone()) {
+    // A streamed capture already holds its job; its tail is in the tap.
+    let live_job = (matches!(target, TranscriptionTarget::Paste) && protocol.is_none())
+        .then(|| worker.finish_live())
+        .flatten();
+    match live_job.map_or_else(
+        || worker.transcribe(clip, target, protocol, context.clone()),
+        Ok,
+    ) {
         Ok(job_id) => {
             if let Some(indicator) = indicator {
                 indicator.send(DictationIndicatorEvent::Submitted {

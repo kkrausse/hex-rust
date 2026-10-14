@@ -83,4 +83,28 @@ impl OfflineGgufSession {
             },
         }
     }
+
+    pub(crate) fn supports_streaming(&self) -> bool {
+        self.model.capabilities().supports_streaming
+    }
+
+    /// Run `live` against one stream, then replace the session the same way
+    /// `run` does so stream scratch never outlives the dictation.
+    pub(crate) fn stream<T>(
+        &mut self,
+        options: &transcribe_cpp::RunOptions,
+        live: impl FnOnce(&mut transcribe_cpp::Stream<'_>) -> T,
+    ) -> transcribe_cpp::Result<T> {
+        let mut session = match self.session.take() {
+            Some(session) => session,
+            None => self.model.session()?,
+        };
+        let result = session
+            .stream(options, &transcribe_cpp::StreamOptions::default())
+            .map(|mut stream| live(&mut stream));
+        drop(session);
+        let session = self.model.session()?;
+        self.session = Some(session);
+        result
+    }
 }

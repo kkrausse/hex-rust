@@ -221,6 +221,11 @@ impl Profiles {
         selected.map_or(&self.default, |selected| &selected.profile)
     }
 
+    /// Apply only the selected profile's text replacements.
+    pub fn replace(&self, text: &str, context: &ContextSnapshot) -> String {
+        self.select(context).replacements.replace(text)
+    }
+
     pub fn processes(&self, context: &ContextSnapshot) -> bool {
         let profile = self.select(context);
         profile.ai_enabled || !profile.transformations.is_empty()

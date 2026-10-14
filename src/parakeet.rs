@@ -5,7 +5,7 @@ use std::sync::Once;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use color_eyre::eyre::{Result, WrapErr, eyre};
 use transcribe_cpp::{
@@ -102,7 +102,61 @@ struct InferenceJob {
 enum InferenceCommand {
     Reload(TranscriptionSelection),
     Transcribe(Box<InferenceJob>),
+    Live(Box<LiveJob>),
 }
+
+/// Audio handed from the capture owner to a live transcription stream. The
+/// owner pushes samples while the capture records and ends the tap exactly
+/// once, when that capture finishes or is abandoned.
+#[derive(Clone, Default)]
+pub struct LiveTap(Arc<Mutex<LiveAudio>>);
+
+#[derive(Default)]
+struct LiveAudio {
+    samples: Vec<f32>,
+    end: Option<LiveEnd>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LiveEnd {
+    Finished,
+    Cancelled,
+}
+
+impl LiveTap {
+    pub fn push(&self, samples: &[f32]) {
+        self.lock().samples.extend_from_slice(samples);
+    }
+
+    pub fn finish(&self) {
+        self.lock().end.get_or_insert(LiveEnd::Finished);
+    }
+
+    pub fn cancel(&self) {
+        self.lock().end.get_or_insert(LiveEnd::Cancelled);
+    }
+
+    fn take(&self) -> (Vec<f32>, Option<LiveEnd>) {
+        let mut audio = self.lock();
+        (std::mem::take(&mut audio.samples), audio.end)
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, LiveAudio> {
+        self.0.lock().unwrap_or_else(|error| error.into_inner())
+    }
+}
+
+struct LiveJob {
+    job_id: DictationJobId,
+    control: Arc<JobControl>,
+    tap: LiveTap,
+    context: ContextSnapshot,
+    selection: TranscriptionSelection,
+}
+
+/// Matches the trailing context batch Unified English gets in `transcription`.
+const LIVE_TRAILING_SILENCE_SAMPLES: usize = 3_200;
+const LIVE_POLL_INTERVAL: Duration = Duration::from_millis(30);
 
 struct ProcessorJob {
     job_id: DictationJobId,
@@ -125,6 +179,8 @@ struct JobTimings {
 
 struct CompletedTranscript {
     text: String,
+    /// Bytes of `text` live dictation already inserted; only the rest pastes.
+    live_pasted: usize,
     /// Corrected local transcript before mode processing.
     raw: String,
     application: Option<String>,
@@ -134,6 +190,13 @@ struct CompletedTranscript {
 
 enum OutputJob {
     PreparePaste,
+    /// Words released by a live stream. Bypasses ordering: a live job only
+    /// starts when no earlier output is pending.
+    LivePaste {
+        job_id: DictationJobId,
+        control: Arc<JobControl>,
+        text: String,
+    },
     Completed {
         job_id: DictationJobId,
         control: Arc<JobControl>,
@@ -153,6 +216,7 @@ impl OutputJob {
     fn sequence(&self) -> u64 {
         match self {
             Self::PreparePaste => u64::MAX,
+            Self::LivePaste { job_id, .. } => job_id.0,
             Self::Completed { job_id, .. } | Self::Cancelled { job_id } => job_id.0,
             Self::Paste { sequence, .. } => *sequence,
         }
@@ -217,6 +281,10 @@ impl OrderedOutputs {
 
 pub struct DictationWorker {
     inference_jobs: Option<SyncSender<InferenceCommand>>,
+    /// The current hotkey capture's live job, if it streams.
+    live: Mutex<Option<(DictationJobId, LiveTap)>>,
+    /// Whether the warm model can stream; maintained by the inference worker.
+    live_capable: Arc<AtomicBool>,
     output_jobs: Option<SyncSender<OutputJob>>,
     events: Receiver<WorkerEvent>,
     state: Arc<Mutex<WorkerState>>,
@@ -284,15 +352,25 @@ impl DictationWorker {
             })
             .collect();
 
+        let live_capable = Arc::new(AtomicBool::new(false));
         let inference_worker = thread::spawn({
             let output = output_jobs.clone();
+            let live_capable = live_capable.clone();
             move || {
-                run_inference_worker(inference_receiver, &processor_jobs, &output, &event_sender)
+                run_inference_worker(
+                    inference_receiver,
+                    &processor_jobs,
+                    &output,
+                    &event_sender,
+                    &live_capable,
+                )
             }
         });
 
         Self {
             inference_jobs: Some(inference_jobs),
+            live: Mutex::new(None),
+            live_capable,
             output_jobs: Some(output_jobs),
             events,
             state,
@@ -332,6 +410,52 @@ impl DictationWorker {
                 job_id
             })
             .map_err(queue_error)
+    }
+
+    /// Reserve a live job for a hotkey capture that is about to start, or
+    /// `None` when it should take the batch path: live dictation is off, the
+    /// warm model cannot stream, the context needs processing that rewrites
+    /// whole transcripts, or earlier output is still pending.
+    pub fn begin_live(&self, context: &ContextSnapshot) -> Option<LiveTap> {
+        if !crate::app_settings::live_dictation()
+            || !self.live_capable.load(Ordering::Acquire)
+            || crate::config::dictation_profiles().processes(context)
+        {
+            return None;
+        }
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        if !state.jobs.is_empty() || state.pending_pastes > 0 {
+            return None;
+        }
+        let job_id = DictationJobId(state.next_output_sequence().ok()?);
+        let control = Arc::new(JobControl::default());
+        let tap = LiveTap::default();
+        let (_, selection) = crate::app_settings::transcription_selection();
+        self.inference_jobs
+            .as_ref()?
+            .try_send(InferenceCommand::Live(Box::new(LiveJob {
+                job_id,
+                control: control.clone(),
+                tap: tap.clone(),
+                context: context.clone(),
+                selection,
+            })))
+            .ok()?;
+        state.next_sequence += 1;
+        state.jobs.insert(job_id, control);
+        *self.live.lock().unwrap_or_else(|error| error.into_inner()) = Some((job_id, tap.clone()));
+        Some(tap)
+    }
+
+    /// The live job of the capture that just finished, if it streamed. Its
+    /// remaining audio is already in the tap; nothing needs submitting.
+    pub fn finish_live(&self) -> Option<DictationJobId> {
+        let (job_id, tap) = self
+            .live
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take()?;
+        (tap.lock().end == Some(LiveEnd::Finished)).then_some(job_id)
     }
 
     pub fn prepare_paste(&self) {
@@ -435,6 +559,25 @@ fn run_output_worker(
     while let Ok(job) = jobs.recv() {
         if matches!(job, OutputJob::PreparePaste) {
             paster.prepare();
+            continue;
+        }
+        if let OutputJob::LivePaste {
+            job_id,
+            control,
+            text,
+        } = job
+        {
+            if job_id.0 != ordered.next_sequence {
+                tracing::warn!(
+                    job_id = job_id.0,
+                    "live paste arrived out of order; dropped"
+                );
+                continue;
+            }
+            if let Err(error) = paster.paste(&text, PasteMode::Continue, || control.begin_output())
+            {
+                tracing::warn!(%error, "live paste failed");
+            }
             continue;
         }
         for job in ordered.push(job) {
@@ -544,6 +687,7 @@ fn run_processor_worker(
                 target: job.target,
                 result: Box::new(Ok(CompletedTranscript {
                     text: processed.text,
+                    live_pasted: 0,
                     raw: job.text,
                     application: job.context.application,
                     timings: job.timings,
@@ -582,6 +726,7 @@ fn run_inference_worker(
     processor_jobs: &SyncSender<ProcessorJob>,
     output: &SyncSender<OutputJob>,
     events: &mpsc::Sender<WorkerEvent>,
+    live_capable: &AtomicBool,
 ) {
     prioritize_inference_thread();
     let mut transcriber = match WarmTranscriber::load() {
@@ -594,11 +739,21 @@ fn run_inference_worker(
             WarmTranscriber::default()
         }
     };
+    live_capable.store(transcriber.supports_streaming(), Ordering::Release);
     while let Ok(command) = commands.recv() {
         let job = match command {
             InferenceCommand::Reload(selection) => {
                 if let Err(error) = transcriber.activate(&selection) {
                     let _ = events.send(WorkerEvent::ModelFailed(error.to_string()));
+                }
+                live_capable.store(transcriber.supports_streaming(), Ordering::Release);
+                continue;
+            }
+            InferenceCommand::Live(job) => {
+                let output_job = run_live_job(*job, &mut transcriber, output);
+                live_capable.store(transcriber.supports_streaming(), Ordering::Release);
+                if output.send(output_job).is_err() {
+                    break;
                 }
                 continue;
             }
@@ -689,6 +844,7 @@ fn run_inference_worker(
                 let result = result.map(|text| CompletedTranscript {
                     raw: text.clone(),
                     text,
+                    live_pasted: 0,
                     application,
                     timings,
                     processing: None,
@@ -706,6 +862,142 @@ fn run_inference_worker(
                 }
             }
         }
+    }
+}
+
+/// Stream one hotkey capture, sending each newly committed whole word to the
+/// output worker as it appears. Returns the job's terminal output. A model
+/// that cannot stream (the selection changed since `begin_live`) falls back
+/// to one batch transcription of the same audio.
+fn run_live_job(
+    job: LiveJob,
+    transcriber: &mut WarmTranscriber,
+    output: &SyncSender<OutputJob>,
+) -> OutputJob {
+    let profiles = crate::config::dictation_profiles();
+    let mut released = String::new();
+    let mut inserted = String::new();
+    let mut audio_samples = 0usize;
+    let mut ended_at = None;
+    let mut release = |committed: &str, final_text: bool, inserted: &mut String| {
+        // Committed text is append-only; anything else means the cursor is lost.
+        let Some(pending) = committed.strip_prefix(released.as_str()) else {
+            tracing::warn!("live transcript diverged from released text; holding the rest");
+            return;
+        };
+        // A stream commits sentencepiece pieces, so hold back a trailing
+        // partial word until whitespace or the final text ends it.
+        let cut = if final_text {
+            pending.len()
+        } else {
+            match pending.rfind(char::is_whitespace) {
+                Some(cut) => cut,
+                None => return,
+            }
+        };
+        let piece = &pending[..cut];
+        released.push_str(piece);
+        let piece = if inserted.is_empty() {
+            piece.trim_start()
+        } else {
+            piece
+        };
+        if piece.trim().is_empty() {
+            return;
+        }
+        let text = profiles.replace(piece, &job.context);
+        inserted.push_str(&text);
+        let _ = output.send(OutputJob::LivePaste {
+            job_id: job.job_id,
+            control: job.control.clone(),
+            text,
+        });
+    };
+    let mut wait_for_end = |feed: &mut dyn FnMut(&[f32]) -> Result<()>| -> Result<LiveEnd> {
+        loop {
+            let (samples, end) = job.tap.take();
+            if !samples.is_empty() {
+                audio_samples += samples.len();
+                feed(&samples)?;
+            }
+            if let Some(end) = end {
+                ended_at.get_or_insert_with(Instant::now);
+                return Ok(end);
+            }
+            if job.control.is_cancelled() {
+                return Ok(LiveEnd::Cancelled);
+            }
+            thread::sleep(LIVE_POLL_INTERVAL);
+        }
+    };
+
+    let outcome = match transcriber.activate(&job.selection) {
+        Err(error) => Err(error.to_string()),
+        Ok(transcriber) => match transcriber.streaming_model() {
+            Some(model) => model
+                .stream(|stream| {
+                    let end = wait_for_end(&mut |samples| {
+                        stream.feed(samples)?;
+                        release(&stream.text().committed, false, &mut inserted);
+                        Ok(())
+                    })?;
+                    if end == LiveEnd::Finished {
+                        stream.feed(&[0.0; LIVE_TRAILING_SILENCE_SAMPLES])?;
+                        stream.finalize()?;
+                        release(&stream.text().committed, true, &mut inserted);
+                    }
+                    Ok(end)
+                })
+                .map_err(|error| error.to_string()),
+            None => {
+                tracing::info!("selected model cannot stream; live dictation uses batch");
+                let mut samples = Vec::new();
+                wait_for_end(&mut |chunk| {
+                    samples.extend_from_slice(chunk);
+                    Ok(())
+                })
+                .and_then(|end| {
+                    if end == LiveEnd::Finished {
+                        let text = transcriber.transcribe(std::mem::take(&mut samples))?;
+                        release(text.trim(), true, &mut inserted);
+                    }
+                    Ok(end)
+                })
+                .map_err(|error| error.to_string())
+            }
+        },
+    };
+    let finished_at = ended_at.unwrap_or_else(Instant::now);
+    tracing::info!(
+        audio_ms = audio_samples as u64 * 1_000 / 16_000,
+        finalize_ms = finished_at.elapsed().as_millis(),
+        "live dictation ended"
+    );
+    match outcome {
+        Ok(LiveEnd::Cancelled) if inserted.is_empty() => {
+            OutputJob::Cancelled { job_id: job.job_id }
+        }
+        // Cancelling a stream stops it; words already inserted stay and are
+        // recorded like a finished dictation.
+        outcome => OutputJob::Completed {
+            job_id: job.job_id,
+            control: job.control,
+            target: TranscriptionTarget::Paste,
+            result: Box::new(outcome.map(|_| CompletedTranscript {
+                raw: released.trim().to_string(),
+                live_pasted: inserted.len(),
+                text: inserted,
+                application: job.context.application,
+                timings: JobTimings {
+                    total_started: finished_at,
+                    queue_ms: 0,
+                    audio_ms: audio_samples as u64 * 1_000 / 16_000,
+                    prepare_ms: 0,
+                    inference_ms: finished_at.elapsed().as_millis(),
+                },
+                processing: None,
+            })),
+        },
     }
 }
 
@@ -751,7 +1043,9 @@ fn finish_output(
     history: Option<&History>,
 ) -> WorkerEvent {
     match job {
-        OutputJob::PreparePaste => unreachable!("paste preparation bypasses ordered output"),
+        OutputJob::PreparePaste | OutputJob::LivePaste { .. } => {
+            unreachable!("paste preparation and live pastes bypass ordered output")
+        }
         OutputJob::Completed {
             job_id,
             control,
@@ -776,23 +1070,24 @@ fn finish_output(
                     return Err("voice action was cancelled".into());
                 }
                 let paste_started = Instant::now();
-                if !completed.text.trim().is_empty() {
+                let remainder = &completed.text[completed.live_pasted..];
+                if !remainder.trim().is_empty() {
                     let commit = || control.begin_output();
                     match target {
                         TranscriptionTarget::Paste => {
-                            paste(&completed.text, PasteMode::Continue, &commit)
+                            paste(remainder, PasteMode::Continue, &commit)
                         }
-                        TranscriptionTarget::Send => {
-                            paste(&completed.text, PasteMode::Send, &commit)
-                        }
+                        TranscriptionTarget::Send => paste(remainder, PasteMode::Send, &commit),
                         TranscriptionTarget::VoiceAction => {
-                            paste(&completed.text, PasteMode::Standalone, &commit)
+                            paste(remainder, PasteMode::Standalone, &commit)
                         }
                         TranscriptionTarget::Service => commit()
                             .then_some(())
                             .ok_or_else(|| eyre!("dictation was cancelled")),
                     }
                     .map_err(|error| error.to_string())?;
+                }
+                if !completed.text.trim().is_empty() {
                     if matches!(
                         target,
                         TranscriptionTarget::Paste | TranscriptionTarget::Send
@@ -1076,6 +1371,24 @@ impl Parakeet {
 
     pub(crate) fn matches_selection(&self, selection: &TranscriptionSelection) -> bool {
         self.selection.as_ref() == Some(selection)
+    }
+
+    pub(crate) fn supports_streaming(&self) -> bool {
+        self.session.supports_streaming()
+    }
+
+    /// Run `live` against a fresh stream with this model's run options.
+    pub(crate) fn stream<T>(
+        &mut self,
+        live: impl FnOnce(&mut transcribe_cpp::Stream<'_>) -> Result<T>,
+    ) -> Result<T> {
+        let options = RunOptions {
+            timestamps: TimestampKind::None,
+            ..self.options.clone()
+        };
+        self.session
+            .stream(&options, live)
+            .wrap_err("could not start live transcription")?
     }
 
     pub(crate) fn model_id(&self) -> Option<TranscriptionModelId> {
@@ -1389,6 +1702,8 @@ mod tests {
         let (_, events) = mpsc::channel();
         let worker = DictationWorker {
             inference_jobs: None,
+            live: Mutex::new(None),
+            live_capable: Arc::new(AtomicBool::new(false)),
             output_jobs: Some(output_sender),
             events,
             state: Arc::new(Mutex::new(WorkerState {
@@ -1478,6 +1793,7 @@ mod tests {
 
         let completed = |text: &str| CompletedTranscript {
             text: text.into(),
+            live_pasted: 0,
             raw: text.into(),
             application: None,
             timings: JobTimings {
@@ -1634,6 +1950,73 @@ mod tests {
         assert_eq!(state.cancel_latest(), Some(DictationJobId(1)));
         assert_eq!(state.cancel_latest(), Some(DictationJobId(0)));
         assert_eq!(state.cancel_latest(), None);
+    }
+
+    #[test]
+    #[ignore = "requires HEX_LIVE_FIXTURE (16 kHz mono speech WAV) and installed Parakeet Unified"]
+    fn live_job_pastes_whole_words_while_audio_arrives_and_joins_to_the_final_text() {
+        let path = PathBuf::from(std::env::var_os("HEX_LIVE_FIXTURE").expect("fixture path"));
+        let samples = WavReader::open(path)
+            .unwrap()
+            .samples::<i16>()
+            .map(|sample| f32::from(sample.unwrap()) / 32768.0)
+            .collect::<Vec<_>>();
+        let selection = TranscriptionSelection {
+            model: TranscriptionModelId::ParakeetUnifiedEnglish,
+            language: "en".into(),
+            recognition_hints: String::new(),
+        };
+        let mut transcriber = WarmTranscriber::default();
+        transcriber.activate(&selection).unwrap();
+        let tap = LiveTap::default();
+        let feeder = thread::spawn({
+            let tap = tap.clone();
+            move || {
+                // Real time: 30 ms of audio every 30 ms, like the capture owner.
+                for chunk in samples.chunks(480) {
+                    tap.push(chunk);
+                    thread::sleep(Duration::from_millis(30));
+                }
+                tap.finish();
+            }
+        });
+        let (output, outputs) = mpsc::sync_channel(256);
+        let started = Instant::now();
+        let job = LiveJob {
+            job_id: DictationJobId(0),
+            control: Arc::new(JobControl::default()),
+            tap,
+            context: ContextSnapshot::default(),
+            selection,
+        };
+        let terminal = run_live_job(job, &mut transcriber, &output);
+        feeder.join().unwrap();
+
+        let pastes = outputs
+            .try_iter()
+            .map(|job| match job {
+                OutputJob::LivePaste { text, .. } => text,
+                _ => panic!("only live pastes precede the terminal output"),
+            })
+            .collect::<Vec<_>>();
+        let OutputJob::Completed { result, .. } = terminal else {
+            panic!("a finished live job completes");
+        };
+        let completed = result.unwrap();
+        eprintln!("{} ms, pastes: {pastes:#?}", started.elapsed().as_millis());
+        assert!(
+            pastes.len() > 2,
+            "words must arrive while audio is still streaming"
+        );
+        assert_eq!(pastes.concat(), completed.text);
+        assert_eq!(completed.live_pasted, completed.text.len());
+        // Cuts fall only on whitespace, so no word is split across pastes.
+        assert!(pastes[1..].iter().all(|paste| paste.starts_with(' ')));
+        assert!(
+            completed
+                .text
+                .starts_with("This is a test of live dictation.")
+        );
     }
 
     #[test]
