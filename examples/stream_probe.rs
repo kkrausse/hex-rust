@@ -13,10 +13,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
     let model_path = args.next().expect("model path");
     let audio_path = args.next().expect("wav path");
-    let policy = match args.next().as_deref() {
-        Some("stable") => CommitPolicy::StablePrefix,
-        _ => CommitPolicy::Auto,
-    };
+    let policy = CommitPolicy::Auto;
+    let chunk_ms = args.next().and_then(|v| v.parse().ok());
+    let right_ms = args.next().and_then(|v| v.parse().ok());
     let mut reader = hound::WavReader::open(&audio_path)?;
     let pcm: Vec<f32> = reader
         .samples::<i16>()
@@ -44,6 +43,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let opts = StreamOptions {
         commit_policy: policy,
+        family: Some(transcribe_cpp::StreamExtension::ParakeetBuffered(
+            transcribe_cpp::ParakeetBufferedStreamOptions {
+                left_ms: None,
+                chunk_ms,
+                right_ms,
+            },
+        )),
         ..Default::default()
     };
     for pass in 0..2 {

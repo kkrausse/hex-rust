@@ -1001,14 +1001,12 @@ pub fn listen(
         {
             hotkeys.recover_stale_keys();
         }
-        if hotkeys.dictation.is_recording()
-            && edit_pending_since.is_none()
-            && input.become_intentional(capture_boundary(
+        // The start tone already played on press.
+        if hotkeys.dictation.is_recording() && edit_pending_since.is_none() {
+            input.become_intentional(capture_boundary(
                 &input,
                 microphone_policy.release_while_idle,
-            ))?
-        {
-            feedback::play(Tone::DictationStart);
+            ))?;
         }
         if edit_pending_since.is_some_and(|started| {
             capture_boundary(&input, microphone_policy.release_while_idle).duration_since(started)
@@ -1552,6 +1550,9 @@ fn handle_hotkey_action(
             if !accepted {
                 return Ok(false);
             }
+            // Click on press, not after the 300 ms short-tap threshold; a
+            // discarded short tap still clicks.
+            feedback::play(Tone::DictationStart);
             reset_command_recognizer(dictation, recognizer)?;
             events.dictation(DictationPhase::Started, "")?;
             if let Some(indicator) = indicator {
@@ -1560,9 +1561,7 @@ fn handle_hotkey_action(
             emit_state(events, true, mode, device)
         }
         HotkeyAction::Finish => {
-            if dictation.become_intentional(action_at)? {
-                feedback::play(Tone::DictationStart);
-            }
+            dictation.become_intentional(action_at)?;
             let _ = finish_dictation(
                 dictation,
                 action_at,
