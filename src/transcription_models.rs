@@ -18,6 +18,8 @@ pub enum TranscriptionModelId {
     #[default]
     #[serde(rename = "parakeet_unified_en")]
     ParakeetUnifiedEnglish,
+    #[serde(rename = "parakeet_unified_en_q4")]
+    ParakeetUnifiedEnglishQ4,
     #[serde(rename = "parakeet_tdt_ctc_110m")]
     ParakeetTdtCtc110m,
     ParakeetV2,
@@ -33,6 +35,7 @@ impl TranscriptionModelId {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::ParakeetUnifiedEnglish => "parakeet_unified_en",
+            Self::ParakeetUnifiedEnglishQ4 => "parakeet_unified_en_q4",
             Self::ParakeetTdtCtc110m => "parakeet_tdt_ctc_110m",
             Self::ParakeetV2 => "parakeet_v2",
             Self::ParakeetV3 => "parakeet_v3",
@@ -51,6 +54,7 @@ impl FromStr for TranscriptionModelId {
     fn from_str(value: &str) -> Result<Self> {
         match value {
             "parakeet_unified_en" => Ok(Self::ParakeetUnifiedEnglish),
+            "parakeet_unified_en_q4" => Ok(Self::ParakeetUnifiedEnglishQ4),
             "parakeet_tdt_ctc_110m" => Ok(Self::ParakeetTdtCtc110m),
             "parakeet_v2" => Ok(Self::ParakeetV2),
             "parakeet_v3" => Ok(Self::ParakeetV3),
@@ -183,7 +187,8 @@ pub enum LiveMode {
 impl ModelDefinition {
     pub const fn live_mode(&self) -> LiveMode {
         match self.id {
-            TranscriptionModelId::ParakeetUnifiedEnglish => LiveMode::Native,
+            TranscriptionModelId::ParakeetUnifiedEnglish
+            | TranscriptionModelId::ParakeetUnifiedEnglishQ4 => LiveMode::Native,
             TranscriptionModelId::ParakeetTdtCtc110m
             | TranscriptionModelId::ParakeetV2
             | TranscriptionModelId::ParakeetV3 => LiveMode::Passes,
@@ -282,6 +287,15 @@ const PARAKEET_UNIFIED_ENGLISH_ARTIFACT: GgufArtifact = GgufArtifact {
     architecture: "parakeet",
     variant: "unified-en-0.6b",
 };
+const PARAKEET_UNIFIED_ENGLISH_Q4_ARTIFACT: GgufArtifact = GgufArtifact {
+    filename: "parakeet-unified-en-0.6b-Q4_K_M.gguf",
+    revision: "d5249700b2382bf5c5024c2421d101b8db54a629",
+    repository: "handy-computer/parakeet-unified-en-0.6b-gguf",
+    bytes: 477_274_496,
+    sha256: "a8bf3de2b393bd14ead5a858c3748d5e3b07a20fdeabdd3b498fba4f463fa929",
+    architecture: "parakeet",
+    variant: "unified-en-0.6b",
+};
 const PARAKEET_TDT_CTC_110M_ARTIFACT: GgufArtifact = GgufArtifact {
     filename: "parakeet-tdt_ctc-110m-Q4_K_M.gguf",
     revision: "766f172fe70eb66785e3371664f53762e0fbafaa",
@@ -347,6 +361,20 @@ pub const MODELS: &[ModelDefinition] = &[
         coverage: "English",
         timestamps: "Token timestamps",
         runtime: ModelRuntime::Gguf(&PARAKEET_UNIFIED_ENGLISH_ARTIFACT),
+        languages: &["en"],
+        accepts_language_hint: true,
+        supports_language_detection: false,
+        supports_recognition_hints: false,
+    },
+    ModelDefinition {
+        id: TranscriptionModelId::ParakeetUnifiedEnglishQ4,
+        name: "Parakeet Unified English 4-bit",
+        realtime: "~163x",
+        quality: "Unmeasured",
+        quality_context: "4-bit weights, ~270 MB lighter",
+        coverage: "English",
+        timestamps: "Token timestamps",
+        runtime: ModelRuntime::Gguf(&PARAKEET_UNIFIED_ENGLISH_Q4_ARTIFACT),
         languages: &["en"],
         accepts_language_hint: true,
         supports_language_detection: false,
@@ -562,6 +590,10 @@ pub(crate) fn choices_for_runtime(language: &str) -> Vec<ModelChoice> {
             choice(
                 TranscriptionModelId::ParakeetTdtCtc110m,
                 Recommendation::Fastest,
+            ),
+            choice(
+                TranscriptionModelId::ParakeetUnifiedEnglishQ4,
+                Recommendation::Recommended,
             ),
         ],
         "zh" | "yue" | "ja" | "ko" => vec![
@@ -1083,6 +1115,10 @@ mod tests {
             (
                 TranscriptionModelId::ParakeetUnifiedEnglish,
                 "parakeet_unified_en",
+            ),
+            (
+                TranscriptionModelId::ParakeetUnifiedEnglishQ4,
+                "parakeet_unified_en_q4",
             ),
             (
                 TranscriptionModelId::ParakeetTdtCtc110m,

@@ -134,7 +134,13 @@ impl Transcriber {
 
 fn prepare_gguf_samples(samples: &mut Vec<f32>, model: Option<TranscriptionModelId>) {
     crate::dictation::pad_for_parakeet(samples);
-    if model == Some(TranscriptionModelId::ParakeetUnifiedEnglish) {
+    if matches!(
+        model,
+        Some(
+            TranscriptionModelId::ParakeetUnifiedEnglish
+                | TranscriptionModelId::ParakeetUnifiedEnglishQ4
+        )
+    ) {
         samples.resize(
             samples.len() + UNIFIED_ENGLISH_TRAILING_SILENCE_SAMPLES,
             0.0,
