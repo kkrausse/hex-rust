@@ -14,6 +14,7 @@ use transcribe_cpp::{
 };
 
 use crate::agreement::{Agreement, TimedWord};
+use crate::audio::CaptureInstant;
 use crate::context::ContextSnapshot;
 use crate::dictation::{DictationClip, DictationProtocol, pad_for_parakeet};
 use crate::dictation_processor::ProcessingObservation;
@@ -199,6 +200,9 @@ enum OutputJob {
         job_id: DictationJobId,
         control: Arc<JobControl>,
         text: String,
+        /// Capture-clock ms when queued, and whether it holds the final text.
+        queued_ms: u64,
+        last: bool,
     },
     Completed {
         job_id: DictationJobId,
@@ -568,8 +572,11 @@ fn run_output_worker(
             job_id,
             control,
             text,
+            queued_ms,
+            last,
         } = job
         {
+            let dequeued_ms = CaptureInstant::now().as_millis();
             if job_id.0 != ordered.next_sequence {
                 tracing::warn!(
                     job_id = job_id.0,
@@ -581,6 +588,14 @@ fn run_output_worker(
             {
                 tracing::warn!(%error, "live paste failed");
             }
+            tracing::info!(
+                queued_ms,
+                dequeued_ms,
+                at_ms = CaptureInstant::now().as_millis(),
+                chars = text.len(),
+                last,
+                "release: live paste done"
+            );
             continue;
         }
         for job in ordered.push(job) {
@@ -914,6 +929,8 @@ fn run_live_job(
             job_id: job.job_id,
             control: job.control.clone(),
             text,
+            queued_ms: CaptureInstant::now().as_millis(),
+            last: final_text,
         });
     };
     let mut wait_for_end = |feed: &mut dyn FnMut(&[f32]) -> Result<()>| -> Result<LiveEnd> {
@@ -925,6 +942,10 @@ fn run_live_job(
             }
             if let Some(end) = end {
                 ended_at.get_or_insert_with(Instant::now);
+                tracing::info!(
+                    at_ms = CaptureInstant::now().as_millis(),
+                    "release: live loop saw end"
+                );
                 return Ok(end);
             }
             if job.control.is_cancelled() {
@@ -946,7 +967,15 @@ fn run_live_job(
                     })?;
                     if end == LiveEnd::Finished {
                         stream.feed(&[0.0; LIVE_TRAILING_SILENCE_SAMPLES])?;
+                        tracing::info!(
+                            at_ms = CaptureInstant::now().as_millis(),
+                            "release: trailing silence fed"
+                        );
                         stream.finalize()?;
+                        tracing::info!(
+                            at_ms = CaptureInstant::now().as_millis(),
+                            "release: stream finalized"
+                        );
                         release(&stream.text().committed, true, &mut inserted);
                     }
                     Ok(end)
