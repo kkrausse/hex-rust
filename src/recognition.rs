@@ -1561,6 +1561,11 @@ fn handle_hotkey_action(
             emit_state(events, true, mode, device)
         }
         HotkeyAction::Finish => {
+            tracing::info!(
+                key_up_ms = action_at.as_millis(),
+                at_ms = CaptureInstant::now().as_millis(),
+                "release: key up"
+            );
             dictation.become_intentional(action_at)?;
             let _ = finish_dictation(
                 dictation,

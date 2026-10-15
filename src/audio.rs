@@ -27,6 +27,11 @@ impl CaptureInstant {
         self.0
     }
 
+    /// Milliseconds on the capture clock; release-latency logs share it.
+    pub fn as_millis(self) -> u64 {
+        self.0 / 1_000_000
+    }
+
     #[cfg(target_os = "macos")]
     pub fn now() -> Self {
         unsafe extern "C" {

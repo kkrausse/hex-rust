@@ -246,7 +246,7 @@ impl Paster {
                 let previous = if let Some(prepared) = prepared
                     && prepared.change_count == previous_change_count
                 {
-                    tracing::debug!(
+                    tracing::info!(
                         clipboard_capture_ms = prepared.capture_ms,
                         "used eagerly captured clipboard"
                     );
@@ -254,7 +254,7 @@ impl Paster {
                 } else {
                     let started = Instant::now();
                     let snapshot = capture_clipboard(&self.clipboard)?;
-                    tracing::debug!(
+                    tracing::info!(
                         clipboard_capture_ms = started.elapsed().as_millis(),
                         "captured clipboard at paste time"
                     );
@@ -339,6 +339,10 @@ fn complete_paste(
     wait: impl FnOnce(Duration),
 ) -> Result<()> {
     let posted = post_paste();
+    tracing::info!(
+        at_ms = crate::audio::CaptureInstant::now().as_millis(),
+        "release: cmd-v posted"
+    );
     schedule_restore();
     posted?;
     // Keep the clipboard stable for the target's 100 ms consumption window.

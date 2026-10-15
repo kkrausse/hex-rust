@@ -543,7 +543,13 @@ impl Owner {
                     self.input.cancel_open();
                     Finish::Discard
                 } else {
+                    let draining = Instant::now();
                     self.drain_through(at);
+                    tracing::info!(
+                        drain_ms = draining.elapsed().as_millis(),
+                        at_ms = CaptureInstant::now().as_millis(),
+                        "release: capture drained"
+                    );
                     self.feed_live();
                     self.capture.finish(at)
                 };
