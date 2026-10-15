@@ -155,7 +155,7 @@ struct LiveJob {
     selection: TranscriptionSelection,
 }
 
-/// Matches the trailing context batch Unified English gets in `transcription`.
+/// Trailing context for agreement mode's final pass; matches `transcription`.
 const LIVE_TRAILING_SILENCE_SAMPLES: usize = 3_200;
 const LIVE_POLL_INTERVAL: Duration = Duration::from_millis(30);
 /// An agreement pass needs at least this much new audio.
@@ -945,7 +945,8 @@ fn run_live_job(
                         Ok(())
                     })?;
                     if end == LiveEnd::Finished {
-                        stream.feed(&[0.0; LIVE_TRAILING_SILENCE_SAMPLES])?;
+                        // No trailing silence: feeding it runs one more encoder
+                        // pass (~60-100 ms) after key-up for the same text.
                         stream.finalize()?;
                         release(&stream.text().committed, true, &mut inserted);
                     }

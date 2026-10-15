@@ -100,11 +100,31 @@ impl OfflineGgufSession {
             None => self.model.session()?,
         };
         let result = session
-            .stream(options, &transcribe_cpp::StreamOptions::default())
+            .stream(options, &stream_options(&self.model))
             .map(|mut stream| live(&mut stream));
         drop(session);
         let session = self.model.session()?;
         self.session = Some(session);
         result
+    }
+}
+
+/// Unified English defaults to 1040 ms chunks + 1040 ms lookahead, so words
+/// trail speech by ~2 s and key-up leaves that much audio to finalize.
+/// 160/160 is in its training menu, commits per word, and still runs ~2x
+/// faster than real time on an M1 Pro.
+fn stream_options(model: &transcribe_cpp::Model) -> transcribe_cpp::StreamOptions {
+    if model.variant() != "unified-en-0.6b" {
+        return transcribe_cpp::StreamOptions::default();
+    }
+    transcribe_cpp::StreamOptions {
+        family: Some(transcribe_cpp::StreamExtension::ParakeetBuffered(
+            transcribe_cpp::ParakeetBufferedStreamOptions {
+                left_ms: None,
+                chunk_ms: Some(160),
+                right_ms: Some(160),
+            },
+        )),
+        ..Default::default()
     }
 }
