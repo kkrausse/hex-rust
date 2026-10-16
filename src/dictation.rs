@@ -325,9 +325,17 @@ fn uppercase_initial(text: &str) -> String {
 
 pub struct DictationClip {
     samples: Vec<f32>,
+    /// Start of the audio live transcription has not received yet.
+    live_from: usize,
 }
 
 impl DictationClip {
+    /// Audio after the last live hand-off: the resampler's final partial
+    /// chunk and delay, which only `finish` flushes.
+    pub fn live_tail(&self) -> &[f32] {
+        &self.samples[self.live_from.min(self.samples.len())..]
+    }
+
     pub fn duration_ms(&self) -> u64 {
         self.samples.len() as u64 * 1_000 / u64::from(PARAKEET_SAMPLE_RATE)
     }
@@ -709,8 +717,16 @@ impl DictationCapture {
             return Finish::Discard;
         }
 
+        // Live samples still carry the resampler's leading delay; the clip does not.
+        let live_from = recording.live_taken.saturating_sub(
+            recording
+                .resampler
+                .as_ref()
+                .map_or(0, |resampler| resampler.output_delay()),
+        );
         Finish::Transcribe(DictationClip {
             samples: recording.finish(Some(now)),
+            live_from,
         })
     }
 }
@@ -725,6 +741,31 @@ mod tests {
 
     fn capture_time() -> CaptureInstant {
         CaptureInstant::from_nanos(60_000_000_000)
+    }
+
+    #[test]
+    fn live_samples_plus_tail_cover_the_whole_clip() {
+        let mut capture = DictationCapture::new(48_000);
+        let start = capture_time();
+        capture.start(start);
+        assert!(capture.become_intentional(start + MINIMUM_HOLD_DURATION));
+        let mut live = Vec::new();
+        // 1.25 s of 10 ms chunks; 125 * 480 is not a multiple of the 1024 resampler chunk.
+        for index in 1..=125u64 {
+            let chunk: Vec<f32> = (0..480)
+                .map(|i| ((index * 480 + i) as f32 * 0.05).sin())
+                .collect();
+            capture.ingest(&chunk, start + Duration::from_millis(index * 10));
+            live.extend(capture.take_live_samples());
+        }
+        let Finish::Transcribe(clip) = capture.finish(start + Duration::from_millis(1_250)) else {
+            panic!("expected transcription")
+        };
+        // Before the fix the stream never received this tail.
+        assert!(clip.live_tail().len() > 160);
+        live.extend_from_slice(clip.live_tail());
+        assert_eq!(clip.samples.len(), 20_000);
+        assert!(live.ends_with(&clip.samples), "live stream is missing the clip's end");
     }
 
     #[test]

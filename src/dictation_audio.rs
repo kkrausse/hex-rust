@@ -551,7 +551,11 @@ impl Owner {
                         "release: capture drained"
                     );
                     self.feed_live();
-                    self.capture.finish(at)
+                    let finish = self.capture.finish(at);
+                    if let (Some(live), Finish::Transcribe(clip)) = (&self.live, &finish) {
+                        live.push(clip.live_tail());
+                    }
+                    finish
                 };
                 self.end_live(matches!(finish, Finish::Transcribe(_)));
                 self.state.recording.store(false, Ordering::Release);

@@ -156,7 +156,7 @@ struct LiveJob {
     selection: TranscriptionSelection,
 }
 
-/// Trailing context for agreement mode's final pass; matches `transcription`.
+/// Trailing silence before the final decode; matches `transcription`.
 const LIVE_TRAILING_SILENCE_SAMPLES: usize = 3_200;
 const LIVE_POLL_INTERVAL: Duration = Duration::from_millis(30);
 /// An agreement pass needs at least this much new audio.
@@ -896,6 +896,7 @@ fn run_live_job(
     let mut released = String::new();
     let mut inserted = String::new();
     let mut audio_samples = 0usize;
+    let mut fed = Vec::<f32>::new();
     let mut ended_at = None;
     let mut release = |committed: &str, final_text: bool, inserted: &mut String| {
         // Committed text is append-only; anything else means the cursor is lost.
@@ -938,6 +939,7 @@ fn run_live_job(
             let (samples, end) = job.tap.take();
             if !samples.is_empty() {
                 audio_samples += samples.len();
+                fed.extend_from_slice(&samples);
                 feed(&samples)?;
             }
             if let Some(end) = end {
@@ -966,8 +968,9 @@ fn run_live_job(
                         Ok(())
                     })?;
                     if end == LiveEnd::Finished {
-                        // No trailing silence: feeding it runs one more encoder
-                        // pass (~60-100 ms) after key-up for the same text.
+                        // finalize's own 160 ms pad is not enough lookahead: a
+                        // short last word ("but no") only decodes with this.
+                        stream.feed(&[0.0; LIVE_TRAILING_SILENCE_SAMPLES])?;
                         stream.finalize()?;
                         tracing::info!(
                             at_ms = CaptureInstant::now().as_millis(),
@@ -1058,6 +1061,9 @@ fn run_live_job(
         finalize_ms = finished_at.elapsed().as_millis(),
         "live dictation ended"
     );
+    if let Err(error) = save_last_live(&fed, &inserted) {
+        tracing::warn!(%error, "could not save last live dictation audio");
+    }
     match outcome {
         Ok(LiveEnd::Cancelled) if inserted.is_empty() => {
             OutputJob::Cancelled { job_id: job.job_id }
@@ -1084,6 +1090,25 @@ fn run_live_job(
             })),
         },
     }
+}
+
+/// Keeps the audio the last live stream was fed, and what it pasted, in
+/// logs/last-live.{wav,txt} so a dropped ending can be replayed offline.
+fn save_last_live(samples: &[f32], text: &str) -> Result<()> {
+    let dir = crate::app_paths::logs_dir()?;
+    let spec = hound::WavSpec {
+        channels: 1,
+        sample_rate: 16_000,
+        bits_per_sample: 32,
+        sample_format: hound::SampleFormat::Float,
+    };
+    let mut writer = hound::WavWriter::create(dir.join("last-live.wav"), spec)?;
+    for &sample in samples {
+        writer.write_sample(sample)?;
+    }
+    writer.finalize()?;
+    std::fs::write(dir.join("last-live.txt"), text)?;
+    Ok(())
 }
 
 fn join_worker(worker: Option<thread::JoinHandle<()>>, name: &str) {
