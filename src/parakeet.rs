@@ -424,7 +424,9 @@ impl DictationWorker {
     /// warm model cannot stream, the context needs processing that rewrites
     /// whole transcripts, or earlier output is still pending.
     pub fn begin_live(&self, context: &ContextSnapshot) -> Option<LiveTap> {
-        if !crate::app_settings::live_dictation()
+        let (_, selection) = crate::app_settings::transcription_selection();
+        let mode = crate::transcription_models::definition(selection.model).live_mode();
+        if !crate::app_settings::live_dictation(mode)
             || !self.live_capable.load(Ordering::Acquire)
             || crate::config::dictation_profiles().processes(context)
         {
@@ -437,7 +439,6 @@ impl DictationWorker {
         let job_id = DictationJobId(state.next_output_sequence().ok()?);
         let control = Arc::new(JobControl::default());
         let tap = LiveTap::default();
-        let (_, selection) = crate::app_settings::transcription_selection();
         self.inference_jobs
             .as_ref()?
             .try_send(InferenceCommand::Live(Box::new(LiveJob {

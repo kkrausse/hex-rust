@@ -4217,7 +4217,11 @@ impl AppWindow {
     /// The live dictation switch, plus the pass settings when the selected
     /// model goes live by repeated passes.
     fn render_live_settings(&self, mode: LiveMode, cx: &mut Context<Self>) -> Div {
-        let enabled = self.settings.live_dictation;
+        let enabled = match mode {
+            LiveMode::Native => self.settings.live_dictation,
+            LiveMode::Passes => self.settings.live_pass_dictation,
+            LiveMode::Unavailable => false,
+        };
         let passes = mode == LiveMode::Passes && enabled;
         let description = match mode {
             LiveMode::Native => "Native streaming: words paste as the model commits them",
@@ -4231,9 +4235,13 @@ impl AppWindow {
         );
         let switch = if passes { switch } else { switch.border_b_0() };
         let mut panel = settings_panel().child(switch.id("live-dictation-setting").on_click(
-            cx.listener(|this, _, _, cx| {
-                this.update_settings(cx, |settings| {
-                    settings.live_dictation = !settings.live_dictation;
+            cx.listener(move |this, _, _, cx| {
+                this.update_settings(cx, |settings| match mode {
+                    LiveMode::Native => settings.live_dictation = !settings.live_dictation,
+                    LiveMode::Passes => {
+                        settings.live_pass_dictation = !settings.live_pass_dictation
+                    }
+                    LiveMode::Unavailable => {}
                 });
             }),
         ));
