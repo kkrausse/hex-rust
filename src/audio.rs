@@ -356,9 +356,8 @@ impl AudioInput {
     fn open_prioritized(microphone_priority: &[String], fall_through: bool) -> Result<Self> {
         let host = cpal::default_host();
         let mut last_error = None;
-        for device in input_candidates(&host, microphone_priority)? {
-            let name = device.to_string();
-            match Self::open_device(device) {
+        for (device, name) in input_candidates(&host, microphone_priority)? {
+            match Self::open_device(device, name.clone()) {
                 Ok(input) => return Ok(input),
                 Err(error) if fall_through => {
                     tracing::warn!(%error, device = %name, "could not open microphone; trying the next choice");
@@ -375,9 +374,9 @@ impl AudioInput {
         let device = host
             .input_devices()
             .wrap_err("could not enumerate input devices")?
-            .find(|device| device.to_string() == name)
+            .find(|device| device_name(device).as_deref() == Some(name))
             .ok_or_else(|| eyre!("microphone is unavailable: {name}"))?;
-        Self::open_device(device)
+        Self::open_device(device, name.to_owned())
     }
 
     #[cfg(target_os = "linux")]
@@ -388,11 +387,11 @@ impl AudioInput {
             .wrap_err("could not enumerate input devices")?
             .find(|device| device_matches(device, query))
             .ok_or_else(|| eyre!("microphone is unavailable: {query}"))?;
-        Self::open_device(device)
+        let name = device_name(&device).unwrap_or_else(|| query.to_owned());
+        Self::open_device(device, name)
     }
 
-    fn open_device(device: Device) -> Result<Self> {
-        let device_name = device.to_string();
+    fn open_device(device: Device, device_name: String) -> Result<Self> {
         let supported = device
             .default_input_config()
             .wrap_err("could not read the input device configuration")?;
@@ -685,7 +684,7 @@ impl RecoveringAudioInput {
         }
         let host = cpal::default_host();
         let target = match input_candidates(&host, &self.microphone_priority) {
-            Ok(candidates) => candidates[0].to_string(),
+            Ok(mut candidates) => candidates.swap_remove(0).1,
             Err(error) => {
                 tracing::debug!(%error, "could not resolve the microphone priority list");
                 return;
@@ -757,7 +756,16 @@ fn open_configured_input(
 pub fn default_input_device_name() -> Option<String> {
     cpal::default_host()
         .default_input_device()
-        .map(|device| device.to_string())
+        .and_then(|device| device_name(&device))
+}
+
+/// cpal's `Display` for a device errors (so `to_string` panics) once the
+/// device disappears, which happens while microphones are being unplugged.
+fn device_name(device: &Device) -> Option<String> {
+    device
+        .description()
+        .ok()
+        .map(|description| description.name().to_owned())
 }
 
 pub fn input_device_names() -> Result<Vec<String>> {
@@ -765,7 +773,7 @@ pub fn input_device_names() -> Result<Vec<String>> {
     let mut names = host
         .input_devices()
         .wrap_err("could not enumerate input devices")?
-        .map(|device| device.to_string())
+        .filter_map(|device| device_name(&device))
         .collect::<Vec<_>>();
     names.sort_by_key(|name| name.to_lowercase());
     names.dedup();
@@ -774,7 +782,7 @@ pub fn input_device_names() -> Result<Vec<String>> {
 
 #[cfg(target_os = "linux")]
 fn device_matches(device: &Device, query: &str) -> bool {
-    device_name_matches(&device.to_string(), query)
+    device_name(device).is_some_and(|name| device_name_matches(&name, query))
 }
 
 /// Priority entries match a device by case-insensitive name fragment.
@@ -801,21 +809,26 @@ fn prioritized_input_indices(priority: &[String], names: &[String]) -> Vec<usize
 
 /// Present priority devices in order, then the macOS default input. The first
 /// candidate is the resolved target; later ones are cold-open fallbacks.
-fn input_candidates(host: &cpal::Host, microphone_priority: &[String]) -> Result<Vec<Device>> {
-    let devices: Vec<_> = host
+fn input_candidates(
+    host: &cpal::Host,
+    microphone_priority: &[String],
+) -> Result<Vec<(Device, String)>> {
+    // A device that vanishes mid-enumeration has no name; skip it.
+    let (devices, names): (Vec<_>, Vec<_>) = host
         .input_devices()
         .wrap_err("could not enumerate input devices")?
-        .collect();
-    let names = devices.iter().map(Device::to_string).collect::<Vec<_>>();
+        .filter_map(|device| device_name(&device).map(|name| (device, name)))
+        .unzip();
     let mut candidates = prioritized_input_indices(microphone_priority, &names)
         .into_iter()
-        .map(|index| devices[index].clone())
+        .map(|index| (devices[index].clone(), names[index].clone()))
         .collect::<Vec<_>>();
     if let Some(default) = host.default_input_device() {
         let default = avoid_bluetooth_input(default, &devices);
-        let name = default.to_string();
-        if !candidates.iter().any(|device| device.to_string() == name) {
-            candidates.push(default);
+        if let Some(name) = device_name(&default)
+            && !candidates.iter().any(|(_, candidate)| *candidate == name)
+        {
+            candidates.push((default, name));
         }
     }
     if candidates.is_empty() {
@@ -859,8 +872,8 @@ fn avoid_bluetooth_input(default: Device, devices: &[Device]) -> Device {
     let index = automatic_input_index(default_index, &transports);
     if index != default_index {
         tracing::info!(
-            bluetooth = %devices[default_index],
-            selected = %devices[index],
+            bluetooth = device_name(&devices[default_index]).unwrap_or_default(),
+            selected = device_name(&devices[index]).unwrap_or_default(),
             "automatic microphone selection skipped a Bluetooth headset"
         );
     }
