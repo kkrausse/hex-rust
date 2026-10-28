@@ -130,7 +130,7 @@ listener restart, even after cancellation.
 ```ts
 initial open fails OR stream interrupts
   -> cancel incomplete capture + discard stale audio  // interrupted audio cannot return
-  -> bounded backoff -> reopen selected input         // warm microphone retries
+  -> bounded backoff -> reopen resolved priority input // warm microphone retries
   -> replacement delivers new audio
   -> fresh capture -> release -> expected output
 ```
@@ -141,6 +141,22 @@ Checks in [audio.rs](../../src/audio.rs):
 `recovered_owner_delivers_audio_and_accepts_a_new_capture`.
 Proof limit: retry policy and channel-backed replacement audio, not a physical
 device reconnect or full native mic-to-target result.
+
+`recover.microphone-priority`: a warm stream follows the microphone priority
+list after it opened on a fallback.
+
+```ts
+device list or macOS default input changes      // CoreAudio listener; 2 s poll fallback
+  -> settle 300 ms -> capture idle?               // recording defers the check
+  -> resolved target != open device
+  -> selection change: open target, then drop old  // failure keeps old stream, backs off
+  -> fresh capture uses the target
+```
+Checks in [audio.rs](../../src/audio.rs):
+`priority_resolves_to_the_first_present_entry`,
+`topology_changes_settle_before_re_resolving`.
+Proof limit: resolution and debounce, not a physical device reconnect moving a
+running stream.
 
 `recover.cold-open`: "Release when idle" opens for a gesture, not an idle retry
 loop. Each attempt must own its opening result.

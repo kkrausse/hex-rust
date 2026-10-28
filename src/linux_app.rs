@@ -1238,8 +1238,8 @@ impl LinuxApp {
                                         ))
                                         .child(settings_row(
                                             "Microphone",
-                                            "Automatically chooses the preferred available input",
-                                            disclosure_button("Automatic"),
+                                            "Follows the system default input",
+                                            disclosure_button("System default"),
                                         ))
                                         .child(
                                             settings_row(

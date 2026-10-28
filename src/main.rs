@@ -216,6 +216,9 @@ enum Command {
         /// Show the idle microphone release confirmation with Commands enabled.
         #[arg(long)]
         confirm_release_microphone: bool,
+        /// Open the microphone priority editor with a sample list.
+        #[arg(long)]
+        open_microphone_priority: bool,
         /// Show the sidebar update action without starting the updater.
         #[arg(long)]
         update_available: bool,
@@ -439,6 +442,7 @@ fn main() -> Result<()> {
             command_model_missing,
             open_history_retention,
             confirm_release_microphone,
+            open_microphone_priority,
             update_available,
         } => {
             if matches!(target, AppPreviewTarget::DictationHud) {
@@ -493,6 +497,7 @@ fn main() -> Result<()> {
                     command_model_missing,
                     open_history_retention,
                     confirm_release_microphone,
+                    open_microphone_priority,
                     update_available,
                 }),
             )

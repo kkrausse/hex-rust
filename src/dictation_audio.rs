@@ -116,7 +116,7 @@ enum Command {
     },
     SelectMicrophone {
         revision: u64,
-        device: Option<String>,
+        priority: Vec<String>,
     },
     SetReleaseWhileIdle(bool),
     Shutdown,
@@ -169,21 +169,21 @@ impl DictationAudio {
     pub fn open(
         device_override: Option<&str>,
         selection_revision: u64,
-        selected_device: Option<&str>,
+        microphone_priority: &[String],
         recording_environment: RecordingEnvironmentController,
         pending_input: PendingInputEvents,
         release_while_idle: bool,
     ) -> Result<Self> {
         let input = if release_while_idle {
-            RecoveringAudioInput::closed(device_override, selection_revision, selected_device)
+            RecoveringAudioInput::closed(device_override, selection_revision, microphone_priority)
         } else {
-            RecoveringAudioInput::open(device_override, selection_revision, selected_device)
+            RecoveringAudioInput::open(device_override, selection_revision, microphone_priority)
         };
         let device_name = input
             .is_open()
             .then(|| input.device_name().to_owned())
             .or_else(|| device_override.map(str::to_owned))
-            .or_else(|| selected_device.map(str::to_owned))
+            .or_else(|| microphone_priority.first().cloned())
             .unwrap_or_else(|| "Default microphone".into());
         Self::with_input(
             input,
@@ -244,11 +244,10 @@ impl DictationAudio {
         self.state.recovering.load(Ordering::Acquire)
     }
 
-    pub fn request_selection(&self, revision: u64, device: Option<&str>) {
-        let _ = self.commands.send(Command::SelectMicrophone {
-            revision,
-            device: device.map(str::to_owned),
-        });
+    pub fn request_selection(&self, revision: u64, priority: Vec<String>) {
+        let _ = self
+            .commands
+            .send(Command::SelectMicrophone { revision, priority });
     }
 
     pub fn set_release_while_idle(&self, release: bool) {
@@ -571,8 +570,8 @@ impl Owner {
                 self.state.recording.store(false, Ordering::Release);
                 let _ = reply.send(());
             }
-            Command::SelectMicrophone { revision, device } => {
-                self.input.request_selection(revision, device.as_deref());
+            Command::SelectMicrophone { revision, priority } => {
+                self.input.request_selection(revision, &priority);
             }
             Command::SetReleaseWhileIdle(release) => {
                 self.release_while_idle = release;
@@ -1199,7 +1198,7 @@ mod tests {
         let input = DictationAudio::open(
             Some("HEX nonexistent microphone for startup recovery test"),
             0,
-            None,
+            &[],
             RecordingEnvironmentController::for_test(),
             PendingInputEvents::default(),
             false,

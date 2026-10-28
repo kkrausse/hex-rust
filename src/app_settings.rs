@@ -35,7 +35,7 @@ struct RuntimeTranscriptionSelection {
 #[derive(Default)]
 struct RuntimeMicrophoneSelection {
     revision: u64,
-    device: Option<String>,
+    priority: Vec<String>,
 }
 
 pub const SHIFT_KEY_MASK: u64 = 1 << 17;
@@ -531,7 +531,12 @@ pub struct AppSettings {
     pub release_microphone_while_idle: bool,
     pub sound_effects: bool,
     pub sound_effect_volume: f32,
-    pub microphone: Option<String>,
+    /// Ordered device names; the first one present wins. After them, and
+    /// when empty, dictation follows the macOS default input.
+    pub microphone_priority: Vec<String>,
+    /// The single-device selection saved before the priority list.
+    #[serde(rename = "microphone", skip_serializing)]
+    pub legacy_microphone: Option<String>,
     pub recording_audio_behavior: RecordingAudioBehavior,
     pub double_tap_lock: bool,
     pub double_tap_only: bool,
@@ -574,7 +579,8 @@ impl Default for AppSettings {
             release_microphone_while_idle: false,
             sound_effects: true,
             sound_effect_volume: 0.5,
-            microphone: None,
+            microphone_priority: Vec::new(),
+            legacy_microphone: None,
             recording_audio_behavior: RecordingAudioBehavior::DoNothing,
             double_tap_lock: true,
             double_tap_only: false,
@@ -731,6 +737,7 @@ impl AppSettings {
                 settings.dictation_processing.default_mode.name = "Global".into();
                 settings.normalize_double_tap_settings();
                 settings.migrate_legacy_replacements();
+                settings.migrate_legacy_microphone();
                 settings.normalize_mode_application_names();
                 settings.migrate_disabled_transcription_model();
                 settings.normalize_transcription_recents();
@@ -807,7 +814,7 @@ impl AppSettings {
             .write()
             .unwrap_or_else(|error| error.into_inner()) = self.runtime_hotkeys();
         set_transcription_selection(&self.transcription);
-        set_microphone_selection(self.microphone.as_deref());
+        set_microphone_selection(&self.microphone_priority);
         crate::config::update_dictation_profiles(&self.dictation_processing);
         *VOICE_ACTION_SETTINGS
             .get_or_init(Default::default)
@@ -854,6 +861,16 @@ impl AppSettings {
             }
         }
         self.text_replacements.clear();
+    }
+
+    fn migrate_legacy_microphone(&mut self) {
+        let Some(device) = self.legacy_microphone.take() else {
+            return;
+        };
+        let device = device.trim();
+        if self.microphone_priority.is_empty() && !device.is_empty() {
+            self.microphone_priority = vec![device.to_owned()];
+        }
     }
 
     fn migrate_disabled_transcription_model(&mut self) {
@@ -930,23 +947,34 @@ pub fn hotkey_conflicts(
         .any(|binding| candidate.overlaps(&binding))
 }
 
-fn set_microphone_selection(device: Option<&str>) {
-    let device = device
-        .map(str::trim)
-        .filter(|device| !device.is_empty())
-        .map(str::to_string);
+fn set_microphone_selection(priority: &[String]) {
+    let mut normalized = Vec::<String>::new();
+    for device in priority.iter().map(|device| device.trim()) {
+        if !device.is_empty() && !normalized.iter().any(|existing| existing == device) {
+            normalized.push(device.to_owned());
+        }
+    }
     let state = MICROPHONE_SELECTION.get_or_init(Default::default);
     let mut state = state.write().unwrap_or_else(|error| error.into_inner());
-    if state.device != device {
+    if state.priority != normalized {
         state.revision = state.revision.wrapping_add(1);
-        state.device = device;
+        state.priority = normalized;
     }
 }
 
-pub fn microphone_selection() -> (u64, Option<String>) {
+/// Cheap change check for loops that poll the selection.
+pub fn microphone_selection_revision() -> u64 {
+    let state = MICROPHONE_SELECTION.get_or_init(Default::default);
+    state
+        .read()
+        .unwrap_or_else(|error| error.into_inner())
+        .revision
+}
+
+pub fn microphone_selection() -> (u64, Vec<String>) {
     let state = MICROPHONE_SELECTION.get_or_init(Default::default);
     let state = state.read().unwrap_or_else(|error| error.into_inner());
-    (state.revision, state.device.clone())
+    (state.revision, state.priority.clone())
 }
 
 fn set_transcription_selection(selection: &TranscriptionSelection) {
@@ -1092,7 +1120,7 @@ mod tests {
         assert!(!settings.release_microphone_while_idle);
         assert!(settings.sound_effects);
         assert_eq!(settings.sound_effect_volume, 0.5);
-        assert_eq!(settings.microphone, None);
+        assert!(settings.microphone_priority.is_empty());
         assert_eq!(
             settings.recording_audio_behavior,
             RecordingAudioBehavior::DoNothing
@@ -1246,6 +1274,29 @@ mod tests {
     }
 
     #[test]
+    fn loading_migrates_a_single_microphone_into_the_priority_list() {
+        let dir = TestSettingsDir::new("legacy-microphone");
+        fs::write(&dir.path, br#"{"microphone":"BY-GM18CU"}"#).unwrap();
+
+        let settings = AppSettings::load_from(&dir.path).unwrap();
+        assert_eq!(settings.microphone_priority, ["BY-GM18CU"]);
+        assert_eq!(settings.legacy_microphone, None);
+        let persisted = fs::read_to_string(&dir.path).unwrap();
+        assert!(!persisted.contains("\"microphone\""));
+        assert!(persisted.contains("\"microphone_priority\""));
+
+        // Automatic and empty legacy selections follow the system default.
+        for legacy in [
+            br#"{"microphone":null}"#.as_slice(),
+            br#"{"microphone":" "}"#,
+        ] {
+            fs::write(&dir.path, legacy).unwrap();
+            let settings = AppSettings::load_from(&dir.path).unwrap();
+            assert!(settings.microphone_priority.is_empty());
+        }
+    }
+
+    #[test]
     fn rewriting_legacy_rust_settings_preserves_onboarding_migration() {
         let dir = TestSettingsDir::new("legacy-onboarding");
         fs::write(&dir.path, b"{}").unwrap();
@@ -1340,7 +1391,7 @@ mod tests {
         };
         let mut settings = AppSettings {
             show_dock_icon: false,
-            microphone: Some("Test microphone".into()),
+            microphone_priority: vec!["Test microphone".into(), "Built-in".into()],
             ..Default::default()
         };
         settings.remember_transcription(french.clone());
@@ -1369,7 +1420,7 @@ mod tests {
         }
         assert_eq!(decoded.transcription_recents.len(), 2);
         assert!(!decoded.show_dock_icon);
-        assert_eq!(decoded.microphone.as_deref(), Some("Test microphone"));
+        assert_eq!(decoded.microphone_priority, ["Test microphone", "Built-in"]);
         let old: AppSettings = serde_json::from_str("{}").unwrap();
         assert!(old.transcription_recents.is_empty());
     }

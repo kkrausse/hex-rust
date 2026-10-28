@@ -334,11 +334,12 @@ pub fn listen(
     let mut last_update = Instant::now();
     let mut recognition_origin = None::<RecognitionOrigin>;
     let recording_environment = RecordingEnvironmentController::start();
-    let (mut microphone_revision, microphone) = crate::app_settings::microphone_selection();
+    let (mut microphone_revision, microphone_priority) =
+        crate::app_settings::microphone_selection();
     let input = DictationAudio::open(
         device_override,
         microphone_revision,
-        microphone.as_deref(),
+        &microphone_priority,
         recording_environment,
         input_monitor.pending_events(),
         microphone_policy.release_while_idle,
@@ -799,9 +800,9 @@ pub fn listen(
                 }
             }
         }
-        let (next_microphone_revision, microphone) = crate::app_settings::microphone_selection();
-        if next_microphone_revision != microphone_revision {
-            input.request_selection(next_microphone_revision, microphone.as_deref());
+        if crate::app_settings::microphone_selection_revision() != microphone_revision {
+            let (next_microphone_revision, priority) = crate::app_settings::microphone_selection();
+            input.request_selection(next_microphone_revision, priority);
             microphone_revision = next_microphone_revision;
         }
         let (next_revision, selection) = crate::app_settings::transcription_selection();

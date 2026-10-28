@@ -100,7 +100,7 @@ substitute for source inspection or a second roadmap.
   host, bounded invocation dispatch, and status snapshots.
 - `text_replacements`: phrase-boundary-aware compilation of configured text
   replacements applied longest-match-first to transcripts.
-- `config`: compiled commands, preferred input devices, and dictation profiles.
+- `config`: compiled commands and dictation profiles.
 - `context`: native foreground application and window context capture plus
   browser context. Browser host is the domain concept; Brave AppleScript is only
   the first adapter.
@@ -252,9 +252,11 @@ CoreAudio formats, AppleScript details, or event serialization.
   window. Both GGUF adapters cap Cohere chunks at the reference processor's
   35 seconds (or a stricter advertised bound); capture duration remains unlimited.
 - A selected microphone switches live only while capture is idle. Opening the
-  replacement must succeed before the old stream is dropped. If the persisted
-  device is unavailable at startup, log the failure and fall back through the
-  compiled preferred-device order to the macOS default. An explicit CLI
+  replacement must succeed before the old stream is dropped. The persisted
+  microphone priority list resolves to its first present device, else the
+  macOS default (Bluetooth defaults yield to a built-in mic). Device-list and
+  default-input changes re-resolve it, and an idle warm stream moves to a new
+  target through the same selection-change path. An explicit CLI
   `--device` remains authoritative for that listener process. A runtime stream
   failure cancels an incomplete capture, discards stale chunks, and retries the
   same selection with bounded backoff; it must not require a settings change or
@@ -477,9 +479,8 @@ the display-free Rust suite. See `docs/nix.md`. Nix owns package updates and
 optional Home Manager autostart. Native Linux PR checks do not replace real
 X11/Wayland, keyboard hotplug, microphone, and target-application smoke tests.
 
-Automatic microphone selection follows the compiled preference order in
-`src/config.rs`, then falls back to the macOS default. A saved microphone takes
-precedence while available; override everything with `--device`. The app bundle
+Microphone selection follows the saved priority list, then the macOS default;
+override everything with `--device`. The app bundle
 build requires Xcode 26 for Icon Composer compilation and a Developer ID signing
 identity. `scripts/release-app.sh` prepares a notarized and stapled DMG plus its
 signed Sparkle appcast; run `scripts/release-app.sh publish` only after validating

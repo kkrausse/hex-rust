@@ -104,26 +104,277 @@ fn sidebar_update_button(
     })
 }
 
-/// The microphone menu is deferred above the settings panel and occludes
-/// everything beneath it, so hovering or choosing a device never reaches the
-/// controls under the menu. A mouse-down anywhere else dismisses it.
-fn microphone_picker_menu(
-    choices: Vec<Option<String>>,
-    selected: Option<String>,
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum MicrophonePriorityEdit {
+    Add(String),
+    MoveUp(usize),
+    MoveDown(usize),
+    Remove(usize),
+}
+
+fn apply_microphone_priority_edit(priority: &mut Vec<String>, edit: &MicrophonePriorityEdit) {
+    match edit {
+        MicrophonePriorityEdit::Add(device) => {
+            if !priority.contains(device) {
+                priority.push(device.clone());
+            }
+        }
+        MicrophonePriorityEdit::MoveUp(index) => {
+            if (1..priority.len()).contains(index) {
+                priority.swap(index - 1, *index);
+            }
+        }
+        MicrophonePriorityEdit::MoveDown(index) => {
+            if index + 1 < priority.len() {
+                priority.swap(*index, index + 1);
+            }
+        }
+        MicrophonePriorityEdit::Remove(index) => {
+            if *index < priority.len() {
+                priority.remove(*index);
+            }
+        }
+    }
+}
+
+struct MicrophonePriorityEntry {
+    name: String,
+    available: bool,
+    active: bool,
+}
+
+/// What the priority editor shows: the saved order with live availability,
+/// the always-present system-default fallback, and connected devices that
+/// can still be added.
+struct MicrophonePriorityMenu {
+    entries: Vec<MicrophonePriorityEntry>,
+    system_default: Option<String>,
+    system_default_active: bool,
+    addable: Vec<String>,
     error: Option<String>,
-    choose: impl Fn(&Option<String>, &mut Window, &mut App) + 'static,
+}
+
+impl MicrophonePriorityMenu {
+    fn new(
+        priority: &[String],
+        devices: &[String],
+        system_default: Option<String>,
+        active: Option<&str>,
+        error: Option<String>,
+    ) -> Self {
+        let resolved = |entry: &str| {
+            devices
+                .iter()
+                .find(|device| crate::audio::device_name_matches(device, entry))
+        };
+        let entries = priority
+            .iter()
+            .map(|entry| {
+                let device = resolved(entry);
+                MicrophonePriorityEntry {
+                    name: entry.clone(),
+                    available: device.is_some(),
+                    active: device.is_some_and(|device| Some(device.as_str()) == active),
+                }
+            })
+            .collect::<Vec<_>>();
+        let system_default_active = !entries.iter().any(|entry| entry.active)
+            && active.is_some_and(|active| devices.iter().any(|device| device == active));
+        let addable = devices
+            .iter()
+            .filter(|device| !priority.iter().any(|entry| entry == *device))
+            .cloned()
+            .collect();
+        Self {
+            entries,
+            system_default,
+            system_default_active,
+            addable,
+            error,
+        }
+    }
+
+    /// The collapsed control names the device the list currently resolves to.
+    fn label(&self) -> String {
+        self.entries
+            .iter()
+            .find(|entry| entry.available)
+            .map_or_else(|| "System default".into(), |entry| entry.name.clone())
+    }
+}
+
+fn microphone_priority_icon(symbol: &'static str, enabled: bool) -> AnyElement {
+    gpui_symbols::Icon::new(symbol)
+        .size(px(10.0))
+        .color(rgb(if enabled { TEXT_SOFT } else { LINE }))
+        .weight(gpui_symbols::SymbolWeight::Semibold)
+        .rendering_mode(gpui_symbols::RenderingMode::Monochrome)
+        .into_any_element()
+}
+
+fn microphone_priority_status(label: &'static str, color: u32) -> Div {
+    div()
+        .flex_none()
+        .text_size(px(10.0))
+        .text_color(rgb(color))
+        .child(label)
+}
+
+fn microphone_priority_row() -> Div {
+    div()
+        .w_full()
+        .h(px(34.0))
+        .pl_2()
+        .pr_1()
+        .flex()
+        .items_center()
+        .gap_2()
+        .rounded_sm()
+        .text_size(px(12.0))
+}
+
+/// The microphone menu is deferred above the settings panel and occludes
+/// everything beneath it, so hovering or editing the list never reaches the
+/// controls under the menu. A mouse-down anywhere else dismisses it.
+fn microphone_priority_menu(
+    menu: MicrophonePriorityMenu,
+    edit: impl Fn(&MicrophonePriorityEdit, &mut Window, &mut App) + 'static,
     dismiss: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
 ) -> gpui::Stateful<Div> {
-    let choose = Rc::new(choose);
+    let edit = Rc::new(edit);
+    let count = menu.entries.len();
+    let action = |id: (&'static str, usize),
+                  symbol: &'static str,
+                  enabled: bool,
+                  change: MicrophonePriorityEdit| {
+        let edit = edit.clone();
+        div()
+            .id(id)
+            .debug_selector(move || format!("{}-{}", id.0, id.1))
+            .size(px(22.0))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_sm()
+            .child(microphone_priority_icon(symbol, enabled))
+            .when(enabled, |button| {
+                button
+                    .cursor_pointer()
+                    .hover(|button| button.bg(rgb(SURFACE_SELECTED)))
+                    .on_click(move |_, window, cx| {
+                        cx.stop_propagation();
+                        edit(&change, window, cx);
+                    })
+            })
+    };
+    let rows = menu.entries.into_iter().enumerate().map(|(index, entry)| {
+        microphone_priority_row()
+            .hover(|row| row.bg(rgb(SURFACE_HOVER)))
+            .child(
+                div()
+                    .w(px(12.0))
+                    .flex_none()
+                    .text_size(px(10.0))
+                    .text_color(rgb(FAINT))
+                    .child((index + 1).to_string()),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .truncate()
+                    .text_color(rgb(if entry.available { TEXT } else { MUTED }))
+                    .child(entry.name),
+            )
+            .when(entry.active, |row| {
+                row.child(microphone_priority_status("Active", POSITIVE))
+            })
+            .when(!entry.available, |row| {
+                row.child(microphone_priority_status("Unavailable", FAINT))
+            })
+            .child(action(
+                ("microphone-priority-up", index),
+                "chevron.up",
+                index > 0,
+                MicrophonePriorityEdit::MoveUp(index),
+            ))
+            .child(action(
+                ("microphone-priority-down", index),
+                "chevron.down",
+                index + 1 < count,
+                MicrophonePriorityEdit::MoveDown(index),
+            ))
+            .child(action(
+                ("microphone-priority-remove", index),
+                "xmark",
+                true,
+                MicrophonePriorityEdit::Remove(index),
+            ))
+    });
+    let system_default = microphone_priority_row()
+        .debug_selector(|| "microphone-priority-system-default".into())
+        .child(
+            div()
+                .w(px(12.0))
+                .flex_none()
+                .text_size(px(10.0))
+                .text_color(rgb(FAINT))
+                .child((count + 1).to_string()),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .flex_1()
+                .truncate()
+                .text_color(rgb(TEXT_SOFT))
+                .child(match menu.system_default {
+                    Some(device) => format!("System default · {device}"),
+                    None => "System default".into(),
+                }),
+        )
+        .when(menu.system_default_active, |row| {
+            row.child(microphone_priority_status("Active", POSITIVE))
+        })
+        .child(
+            div()
+                .pr_2()
+                .child(microphone_priority_status("Fallback", FAINT)),
+        );
+    let nothing_to_add = menu.addable.is_empty();
+    let addable = menu.addable.into_iter().enumerate().map(|(index, device)| {
+        let edit = edit.clone();
+        let change = MicrophonePriorityEdit::Add(device.clone());
+        microphone_priority_row()
+            .id(("microphone-choice", index))
+            .debug_selector(move || format!("microphone-choice-{index}"))
+            .text_color(rgb(TEXT_SOFT))
+            .cursor_pointer()
+            .hover(|row| row.bg(rgb(SURFACE_HOVER)).text_color(rgb(TEXT)))
+            .child(
+                div()
+                    .w(px(12.0))
+                    .flex_none()
+                    .child(microphone_priority_icon("plus", true)),
+            )
+            .child(div().min_w_0().flex_1().truncate().child(device))
+            .on_click(move |_, window, cx| {
+                cx.stop_propagation();
+                edit(&change, window, cx);
+            })
+    });
     div()
         .id("microphone-picker")
         .debug_selector(|| "microphone-picker".into())
         .absolute()
         .top(px(CONTROL_HEIGHT + 4.0))
         .right_0()
-        .w(px(220.0))
-        .max_h(px(240.0))
+        .w(px(320.0))
+        .max_h(px(340.0))
         .p_2()
+        .flex()
+        .flex_col()
+        .gap_1()
         .overflow_y_scroll()
         .rounded_sm()
         .border_1()
@@ -132,39 +383,27 @@ fn microphone_picker_menu(
         .shadow_lg()
         .occlude()
         .on_mouse_down_out(dismiss)
-        .children(choices.into_iter().enumerate().map(|(index, device)| {
-            let is_selected = selected == device;
-            let label = device.clone().unwrap_or_else(|| "Automatic".into());
-            let choose = choose.clone();
-            div()
-                .id(("microphone-choice", index))
-                .debug_selector(move || format!("microphone-choice-{index}"))
-                .w_full()
-                .h(px(34.0))
-                .px_3()
-                .flex()
-                .items_center()
-                .justify_between()
-                .rounded_sm()
-                .text_size(px(12.0))
-                .text_color(if is_selected {
-                    rgb(TEXT)
-                } else {
-                    rgb(TEXT_SOFT)
-                })
-                .when(is_selected, |row| row.bg(rgb(SURFACE_SELECTED)))
-                .hover(|row| row.bg(rgb(SURFACE_HOVER)))
-                .child(label)
-                .on_click(move |_, window, cx| {
-                    cx.stop_propagation();
-                    choose(&device, window, cx);
-                })
-        }))
-        .when_some(error, |picker, error| {
+        .child(compact_section_label("PRIORITY").pt_1())
+        .children(rows)
+        .child(system_default)
+        .child(div().my_1().h(px(1.0)).bg(rgb(LINE)))
+        .child(compact_section_label("ADD MICROPHONE"))
+        .children(addable)
+        .when(nothing_to_add, |picker| {
             picker.child(
                 div()
-                    .px_3()
-                    .pt_2()
+                    .px_2()
+                    .py_1()
+                    .text_size(px(11.0))
+                    .text_color(rgb(FAINT))
+                    .child("Every connected microphone is in the list"),
+            )
+        })
+        .when_some(menu.error, |picker, error| {
+            picker.child(
+                div()
+                    .px_2()
+                    .pt_1()
                     .text_size(px(11.0))
                     .text_color(rgb(NEGATIVE))
                     .child(error),
@@ -431,6 +670,7 @@ pub struct AppWindowPreview {
     pub command_model_missing: bool,
     pub open_history_retention: bool,
     pub confirm_release_microphone: bool,
+    pub open_microphone_priority: bool,
     pub update_available: bool,
 }
 
@@ -981,6 +1221,7 @@ pub struct AppWindow {
     #[cfg(test)]
     settings_save_override: Option<fn(&AppSettings) -> color_eyre::Result<()>>,
     microphone_devices: Vec<String>,
+    microphone_default: Option<String>,
     microphone_picker_open: bool,
     microphone_picker_error: Option<String>,
     launch_at_login_status: Option<LoginItemStatus>,
@@ -1154,6 +1395,10 @@ impl AppWindow {
                     || preview.confirm_release_microphone,
                 ..AppSettings::default()
             };
+            if preview.open_microphone_priority {
+                settings.microphone_priority =
+                    vec!["USB Microphone".into(), "Studio Display Microphone".into()];
+            }
             settings.voice_action.enabled = preview.voice_action_enabled;
             if let Some((language, _)) = &preview.transcription_picker
                 && let Some(choice) = preview_choices(language).first()
@@ -1355,13 +1600,23 @@ impl AppWindow {
         let onboarding_completed = preview_mode || crate::onboarding::completion_recorded();
         let setup_visible = preview.as_ref().is_some_and(|preview| preview.onboarding)
             || !onboarding_completed && !setup_status.ready();
-        let microphone_devices = if preview_mode {
-            vec!["Built-in Microphone".into()]
+        let (microphone_devices, microphone_default) = if preview_mode {
+            (
+                vec![
+                    "AirPods Pro".into(),
+                    "Built-in Microphone".into(),
+                    "USB Microphone".into(),
+                ],
+                Some("Built-in Microphone".into()),
+            )
         } else {
-            crate::audio::input_device_names().unwrap_or_else(|error| {
-                tracing::warn!(%error, "could not list microphones for settings");
-                Vec::new()
-            })
+            (
+                crate::audio::input_device_names().unwrap_or_else(|error| {
+                    tracing::warn!(%error, "could not list microphones for settings");
+                    Vec::new()
+                }),
+                crate::audio::default_input_device_name(),
+            )
         };
         let launch_at_login_status = preview_mode.then_some(LoginItemStatus::Disabled);
         let (login_item_worker, launch_at_login_error) = if preview_mode {
@@ -1403,7 +1658,10 @@ impl AppWindow {
             onboarding_completed,
             permission_refresh_at: Instant::now() + PERMISSION_REFRESH_INTERVAL,
             microphone_devices,
-            microphone_picker_open: false,
+            microphone_default,
+            microphone_picker_open: preview
+                .as_ref()
+                .is_some_and(|preview| preview.open_microphone_priority),
             microphone_picker_error: None,
             launch_at_login_status,
             login_item_worker,
@@ -3266,17 +3524,42 @@ impl AppWindow {
         cx.notify();
     }
 
-    fn render_microphone_picker(&self, cx: &mut Context<Self>) -> AnyElement {
-        let choices = std::iter::once(None)
-            .chain(self.microphone_devices.iter().cloned().map(Some))
-            .collect::<Vec<_>>();
-        microphone_picker_menu(
-            choices,
-            self.settings.microphone.clone(),
+    fn microphone_priority_menu_state(&self) -> MicrophonePriorityMenu {
+        // Preview has no listener, so it shows what the list resolves to.
+        let active = if self.preview {
+            self.settings
+                .microphone_priority
+                .iter()
+                .find_map(|entry| {
+                    self.microphone_devices
+                        .iter()
+                        .find(|device| crate::audio::device_name_matches(device, entry))
+                })
+                .or(self.microphone_default.as_ref())
+                .cloned()
+        } else {
+            self.activity
+                .state
+                .is_some()
+                .then(|| self.activity.device.clone())
+                .flatten()
+        };
+        MicrophonePriorityMenu::new(
+            &self.settings.microphone_priority,
+            &self.microphone_devices,
+            self.microphone_default.clone(),
+            active.as_deref(),
             self.microphone_picker_error.clone(),
-            cx.listener(|this, device: &Option<String>, _, cx| {
-                if this.update_settings(cx, |settings| settings.microphone = device.clone()) {
-                    this.microphone_picker_open = false;
+        )
+    }
+
+    fn render_microphone_picker(&self, cx: &mut Context<Self>) -> AnyElement {
+        microphone_priority_menu(
+            self.microphone_priority_menu_state(),
+            cx.listener(|this, edit: &MicrophonePriorityEdit, _, cx| {
+                if this.update_settings(cx, |settings| {
+                    apply_microphone_priority_edit(&mut settings.microphone_priority, edit)
+                }) {
                     this.microphone_picker_error = None;
                 }
             }),
@@ -3472,11 +3755,7 @@ impl AppWindow {
             .clamp(0.0, 1.0);
         let dock_icon_position = self.dock_icon_toggle.render_position(window);
         let launch_at_login_position = self.launch_at_login_toggle.render_position(window);
-        let microphone_label = self
-            .settings
-            .microphone
-            .clone()
-            .unwrap_or_else(|| "Automatic".into());
+        let microphone_label = self.microphone_priority_menu_state().label();
         let microphone_picker = self
             .microphone_picker_open
             .then(|| self.render_microphone_picker(cx));
@@ -3647,7 +3926,7 @@ impl AppWindow {
                                     ))
                                     .child(settings_row(
                                         "Microphone",
-                                        "Input device for dictation and commands",
+                                        "First available microphone in your list, then the system default",
                                         div()
                                             .relative()
                                             .flex_none()
@@ -3832,10 +4111,11 @@ impl AppWindow {
 
     fn toggle_microphone_picker(&mut self, cx: &mut Context<Self>) {
         self.microphone_picker_open = !self.microphone_picker_open;
-        if self.microphone_picker_open {
+        if self.microphone_picker_open && !self.preview {
             match crate::audio::input_device_names() {
                 Ok(devices) => {
                     self.microphone_devices = devices;
+                    self.microphone_default = crate::audio::default_input_device_name();
                     self.microphone_picker_error = None;
                 }
                 Err(error) => self.microphone_picker_error = Some(error.to_string()),
@@ -8817,6 +9097,7 @@ mod tests {
                 command_model_missing: false,
                 open_history_retention: false,
                 confirm_release_microphone: false,
+                open_microphone_priority: false,
                 update_available: false,
             }),
             window,
@@ -9171,8 +9452,8 @@ mod tests {
                             div()
                                 .child(settings_panel().child(settings_row(
                                     "Microphone",
-                                    "Automatically chooses the preferred available input",
-                                    disclosure_button("Automatic"),
+                                    "First available microphone in your list, then the system default",
+                                    disclosure_button("System default"),
                                 )))
                                 .child(settings_copy(
                                     "Release the microphone when idle?",
@@ -9336,7 +9617,7 @@ mod tests {
         struct Observed {
             beneath_clicks: usize,
             beneath_hovered: bool,
-            chosen: Option<Option<String>>,
+            edits: Vec<MicrophonePriorityEdit>,
             dismissed: usize,
         }
 
@@ -9359,12 +9640,20 @@ mod tests {
                             .relative()
                             .w(px(220.0))
                             .child(disclosure_button("Automatic").id("anchor"))
-                            .child(deferred(microphone_picker_menu(
-                                vec![None, Some("Studio Microphone".into())],
-                                None,
-                                None,
-                                move |device, _, _| {
-                                    chosen.borrow_mut().chosen = Some(device.clone());
+                            .child(deferred(microphone_priority_menu(
+                                MicrophonePriorityMenu::new(
+                                    &["USB Microphone".into(), "Unplugged".into()],
+                                    &[
+                                        "Built-in Microphone".into(),
+                                        "Studio Microphone".into(),
+                                        "USB Microphone".into(),
+                                    ],
+                                    Some("Built-in Microphone".into()),
+                                    Some("USB Microphone"),
+                                    None,
+                                ),
+                                move |edit, _, _| {
+                                    chosen.borrow_mut().edits.push(edit.clone());
                                 },
                                 move |_, _, _| dismissed.borrow_mut().dismissed += 1,
                             )))
@@ -9373,7 +9662,7 @@ mod tests {
                                     .id("beneath")
                                     .debug_selector(|| "beneath".into())
                                     .w(px(220.0))
-                                    .h(px(120.0))
+                                    .h(px(260.0))
                                     .on_hover(move |is_hovered, _, _| {
                                         if *is_hovered {
                                             hovered.borrow_mut().beneath_hovered = true;
@@ -9419,11 +9708,22 @@ mod tests {
         );
 
         cx.simulate_click(second_choice.center(), GpuiModifiers::default());
+        let move_down = cx.debug_bounds("microphone-priority-down-0").unwrap();
+        cx.simulate_click(move_down.center(), GpuiModifiers::default());
+        // The last entry cannot move further down.
+        let blocked = cx.debug_bounds("microphone-priority-down-1").unwrap();
+        cx.simulate_click(blocked.center(), GpuiModifiers::default());
         cx.run_until_parked();
         {
             let observed = observed.borrow();
             assert_eq!(observed.beneath_clicks, 0, "click leaked beneath the menu");
-            assert_eq!(observed.chosen, Some(Some("Studio Microphone".into())));
+            assert_eq!(
+                observed.edits,
+                [
+                    MicrophonePriorityEdit::Add("Studio Microphone".into()),
+                    MicrophonePriorityEdit::MoveDown(0),
+                ]
+            );
             assert_eq!(
                 observed.dismissed, 0,
                 "choosing must not also count as dismissal"

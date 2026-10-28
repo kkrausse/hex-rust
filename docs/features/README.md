@@ -278,9 +278,13 @@ latency measurement.
 ```ts
 Settings                                 // settings
 ├── Dictation shortcut -> Capture a replacement binding
-├── Microphone -> Automatic or saved device
-│   ├── Automatic -> Compiled preferences, then the macOS default
-│   │   └── Default is a Bluetooth headset -> Built-in mic when present // avoids the call profile
+├── Microphone -> Ordered priority list, then System default
+│   ├── Resolve -> First listed device present (name fragment, any case)
+│   │   └── None present or empty list -> macOS default input
+│   │       └── Default is a Bluetooth headset -> Built-in mic when present // avoids the call profile
+│   ├── Plug/unplug or default change -> Re-resolve; idle warm stream moves // never mid-recording
+│   ├── Menu -> Move up / down / remove; add a connected device; Unavailable and Active marks
+│   │   └── Legacy single "microphone" setting -> One-entry list on load
 │   └── Open menu covers the controls beneath it; click elsewhere dismisses
 ├── Microphone mode
 │   ├── Keep ready (fast) -> Open while idle; pre-roll available
@@ -326,10 +330,28 @@ the macOS default input, which switches AirPods and similar headsets into a
 low-quality call profile for all audio, including music
 ([#106](https://github.com/anomalyco/hex/issues/106),
 [#88](https://github.com/anomalyco/hex/issues/88)). It now prefers a built-in
-microphone and keeps the headset only when none exists; an explicitly saved
-headset is still opened. `automatic_input_prefers_built_in_over_a_bluetooth_default`
+microphone and keeps the headset only when none exists; an explicitly
+prioritized headset is still opened. `system_default_fallback_prefers_built_in_over_a_bluetooth_default`
 in [audio.rs](../../src/audio.rs) covers the choice, not CoreAudio's transport
 report or a connected headset.
+
+**Fixed after 2.1.25:** a saved microphone that was missing at open (after sleep
+or unplug) fell back to automatic selection and the warm stream never returned
+to it once it reappeared; automatic selection also ranked compiled personal
+devices ahead of the macOS default and ignored later default changes. Settings
+now hold an ordered `microphone_priority` (a legacy `microphone` value migrates
+to a one-entry list). CoreAudio listeners on the device list and default input
+(a 2 s poll if registration fails) trigger re-resolution after a 300 ms settle;
+when the target differs from the open device and capture is idle, the existing
+selection-change path opens the target before dropping the old stream and logs
+`microphone priority target changed; switching` with from/to.
+`priority_resolves_to_the_first_present_entry`,
+`topology_changes_settle_before_re_resolving` in [audio.rs](../../src/audio.rs)
+and `loading_migrates_a_single_microphone_into_the_priority_list` in
+[app_settings.rs](../../src/app_settings.rs) cover resolution, debounce, and
+migration. `cargo run -- preview settings --open-microphone-priority` shows the
+editor. Not verified: a physical plug/unplug or default-input change switching
+a running warm stream.
 
 **Fixed after 2.1.20:** through 2.1.20 the microphone menu was painted without
 occluding the panel, so hovering or clicking a device also reached the setting
@@ -337,8 +359,9 @@ under the pointer ([#94](https://github.com/anomalyco/hex/issues/94)), and it
 only closed by choosing or reopening. The menu is now anchored to its button,
 occludes the controls beneath it, and closes on any outside mouse-down.
 `microphone_picker_occludes_the_controls_beneath_it` in
-[app_window.rs](../../src/app_window.rs) renders the production menu over a
-hoverable, clickable control and fails without the occlusion; it does not prove
+[app_window.rs](../../src/app_window.rs) renders the production priority menu
+over a hoverable, clickable control, adds and reorders through it, and fails
+without the occlusion; it does not prove
 a native pointer session. The recognition-hints editor also now uses the compact
 multiline height, so it no longer overlaps the shortcut row for Whisper models.
 Screen Recording was unavailable, so that layout is unverified visually.
