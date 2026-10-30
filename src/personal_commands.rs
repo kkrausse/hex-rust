@@ -55,7 +55,7 @@ const MAX_STATUS_BYTES: usize = 256 * 1024;
 const MAX_STATUS_ERROR_BYTES: usize = 4096;
 const MAX_TRANSFORMATION_TEXT_BYTES: usize = 48 * 1024;
 const TRANSFORMATION_TIMEOUT: Duration = Duration::from_secs(10);
-const LOWERCASE_TRANSFORMATION_ID: &str = "lowercase";
+pub(crate) const LOWERCASE_TRANSFORMATION_ID: &str = "lowercase";
 const SPONGEBOB_TRANSFORMATION_ID: &str = "spongebob-case";
 const NO_TRAILING_PUNCTUATION_TRANSFORMATION_ID: &str = "no-trailing-punctuation";
 

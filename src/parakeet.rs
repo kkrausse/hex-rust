@@ -203,6 +203,8 @@ enum OutputJob {
         /// Capture-clock ms when queued, and whether it holds the final text.
         queued_ms: u64,
         last: bool,
+        /// Paste as-is: the profile lowercases, so no sentence-start capital.
+        keep_case: bool,
     },
     Completed {
         job_id: DictationJobId,
@@ -422,13 +424,13 @@ impl DictationWorker {
     /// Reserve a live job for a hotkey capture that is about to start, or
     /// `None` when it should take the batch path: live dictation is off, the
     /// warm model cannot stream, the context needs processing that rewrites
-    /// whole transcripts, or earlier output is still pending.
+    /// whole transcripts (lowercase alone streams), or earlier output is still pending.
     pub fn begin_live(&self, context: &ContextSnapshot) -> Option<LiveTap> {
         let (_, selection) = crate::app_settings::transcription_selection();
         let mode = crate::transcription_models::definition(selection.model).live_mode();
         if !crate::app_settings::live_dictation(mode)
             || !self.live_capable.load(Ordering::Acquire)
-            || crate::config::dictation_profiles().processes(context)
+            || !crate::config::dictation_profiles().streams(context)
         {
             return None;
         }
@@ -575,6 +577,7 @@ fn run_output_worker(
             text,
             queued_ms,
             last,
+            keep_case,
         } = job
         {
             let dequeued_ms = CaptureInstant::now().as_millis();
@@ -585,8 +588,7 @@ fn run_output_worker(
                 );
                 continue;
             }
-            if let Err(error) = paster.paste(&text, PasteMode::Continue, || control.begin_output())
-            {
+            if let Err(error) = paster.paste_live(&text, keep_case, || control.begin_output()) {
                 tracing::warn!(%error, "live paste failed");
             }
             tracing::info!(
@@ -894,6 +896,7 @@ fn run_live_job(
     output: &SyncSender<OutputJob>,
 ) -> OutputJob {
     let profiles = crate::config::dictation_profiles();
+    let keep_case = profiles.lowercases(&job.context);
     let mut released = String::new();
     let mut inserted = String::new();
     let mut audio_samples = 0usize;
@@ -925,7 +928,7 @@ fn run_live_job(
         if piece.trim().is_empty() {
             return;
         }
-        let text = profiles.replace(piece, &job.context);
+        let text = profiles.live_piece(piece, &job.context);
         inserted.push_str(&text);
         let _ = output.send(OutputJob::LivePaste {
             job_id: job.job_id,
@@ -933,6 +936,7 @@ fn run_live_job(
             text,
             queued_ms: CaptureInstant::now().as_millis(),
             last: final_text,
+            keep_case,
         });
     };
     let mut wait_for_end = |feed: &mut dyn FnMut(&[f32]) -> Result<()>| -> Result<LiveEnd> {

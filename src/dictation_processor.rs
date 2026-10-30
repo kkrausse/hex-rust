@@ -221,9 +221,33 @@ impl Profiles {
         selected.map_or(&self.default, |selected| &selected.profile)
     }
 
-    /// Apply only the selected profile's text replacements.
-    pub fn replace(&self, text: &str, context: &ContextSnapshot) -> String {
-        self.select(context).replacements.replace(text)
+    /// Apply the selected profile's replacements, then lowercase if the
+    /// profile asks for it. Used on live pieces, so only per-piece-safe steps.
+    pub fn live_piece(&self, text: &str, context: &ContextSnapshot) -> String {
+        let text = self.select(context).replacements.replace(text);
+        if self.lowercases(context) {
+            text.to_lowercase()
+        } else {
+            text
+        }
+    }
+
+    pub fn lowercases(&self, context: &ContextSnapshot) -> bool {
+        self.select(context)
+            .transformations
+            .iter()
+            .any(|id| id == crate::personal_commands::LOWERCASE_TRANSFORMATION_ID)
+    }
+
+    /// Whether this context can stream: AI rewrites and every transformation
+    /// but lowercase need the whole transcript.
+    pub fn streams(&self, context: &ContextSnapshot) -> bool {
+        let profile = self.select(context);
+        !profile.ai_enabled
+            && profile
+                .transformations
+                .iter()
+                .all(|id| id == crate::personal_commands::LOWERCASE_TRANSFORMATION_ID)
     }
 
     pub fn processes(&self, context: &ContextSnapshot) -> bool {

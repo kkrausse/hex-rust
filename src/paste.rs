@@ -210,18 +210,29 @@ impl Paster {
         commit: impl FnOnce() -> bool,
     ) -> Result<()> {
         if matches!(mode, PasteMode::Send) {
-            send_after_paste(|| self.paste_text(text, mode, commit), keyboard::post_enter)?;
+            send_after_paste(|| self.paste_text(text, mode, false, commit), keyboard::post_enter)?;
             self.continuation = None;
             Ok(())
         } else {
-            self.paste_text(text, mode, commit)
+            self.paste_text(text, mode, false, commit)
         }
+    }
+
+    /// Continue a live stream; `keep_case` skips the sentence-start recasing.
+    pub fn paste_live(
+        &mut self,
+        text: &str,
+        keep_case: bool,
+        commit: impl FnOnce() -> bool,
+    ) -> Result<()> {
+        self.paste_text(text, PasteMode::Continue, keep_case, commit)
     }
 
     fn paste_text(
         &mut self,
         text: &str,
         mode: PasteMode,
+        keep_case: bool,
         commit: impl FnOnce() -> bool,
     ) -> Result<()> {
         let revision = self.activity.revision();
@@ -233,7 +244,7 @@ impl Paster {
             })
             .map_or_else(
                 || text.to_string(),
-                |continuation| join(&continuation.inserted, text),
+                |continuation| join(&continuation.inserted, text, keep_case),
             );
         let generation = commit_prepared_paste(
             || {
@@ -587,9 +598,12 @@ fn cf_data(value: CfDataRef) -> Result<Vec<u8>> {
     Ok(unsafe { std::slice::from_raw_parts(bytes, length as usize) }.to_vec())
 }
 
-fn join(previous: &str, next: &str) -> String {
-    let sentence_start = ends_sentence(previous);
-    let mut next = set_initial_case(next, sentence_start);
+fn join(previous: &str, next: &str, keep_case: bool) -> String {
+    let mut next = if keep_case {
+        next.to_string()
+    } else {
+        set_initial_case(next, ends_sentence(previous))
+    };
     let needs_space = previous
         .chars()
         .next_back()
@@ -821,21 +835,22 @@ mod tests {
     #[test]
     fn joins_contiguous_dictation_with_sentence_aware_spacing() {
         assert_eq!(
-            join("Because if I don't do that,", "And if you see it."),
+            join("Because if I don't do that,", "And if you see it.", false),
             " and if you see it."
         );
         assert_eq!(
-            join("And if you see it.", "well, that works."),
+            join("And if you see it.", "well, that works.", false),
             " Well, that works."
         );
-        assert_eq!(join("Already spaced. ", "Next sentence."), "Next sentence.");
-        assert_eq!(join("Hello", ", world."), ", world.");
+        assert_eq!(join("Already spaced. ", "Next sentence.", false), "Next sentence.");
+        assert_eq!(join("Hello", ", world.", false), ", world.");
+        assert_eq!(join("it works.", "so", true), " so");
     }
 
     #[test]
     fn preserves_likely_proper_nouns_mid_sentence() {
-        assert_eq!(join("Open", "GitHub next."), " GitHub next.");
-        assert_eq!(join("Message", "Slack now."), " Slack now.");
+        assert_eq!(join("Open", "GitHub next.", false), " GitHub next.");
+        assert_eq!(join("Message", "Slack now.", false), " Slack now.");
     }
 
     #[test]
