@@ -122,6 +122,7 @@ pub enum Recommendation {
     Fastest,
     MostAccurate,
     RecognitionHints,
+    Smaller,
 }
 
 impl Recommendation {
@@ -131,6 +132,7 @@ impl Recommendation {
             Self::Fastest => "Fastest",
             Self::MostAccurate => "Most accurate",
             Self::RecognitionHints => "Recognition hints",
+            Self::Smaller => "Smaller, less accurate",
         }
     }
 }
@@ -593,7 +595,7 @@ pub(crate) fn choices_for_runtime(language: &str) -> Vec<ModelChoice> {
             ),
             choice(
                 TranscriptionModelId::ParakeetUnifiedEnglishQ4,
-                Recommendation::Recommended,
+                Recommendation::Smaller,
             ),
         ],
         "zh" | "yue" | "ja" | "ko" => vec![
