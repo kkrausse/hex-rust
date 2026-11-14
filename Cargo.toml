@@ -42,7 +42,7 @@ serde_json = "1.0.151"
 sha2 = "0.11.0"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-transcribe-cpp = "=0.2.4"
+transcribe-cpp = "=0.4.1"
 transcribe-rs = { git = "https://github.com/cjpais/transcribe-rs", rev = "e37c66b6df43af51fde8dec34f98a07aaf09564c", features = ["onnx"], optional = true }
 unicode-segmentation = "1.13.3"
 url = "2.5.8"
@@ -77,7 +77,14 @@ evdev = "0.13.2"
 gpui = { version = "0.2.2", default-features = false, features = ["font-kit", "wayland", "x11"] }
 gtk = "0.18.2"
 gtk-layer-shell = { version = "0.8.2", features = ["v0_6"] }
-transcribe-cpp = { version = "=0.2.4", features = ["vulkan"] }
+transcribe-cpp = { version = "=0.4.1", features = ["vulkan"] }
 udev = "0.9.3"
 x11-clipboard = "0.9.3"
 x11rb = { version = "0.14.0", features = ["xtest"] }
+
+# transcribe.cpp 0.4.1 as upstream Hex (anomalyco/hex) ships it on macOS,
+# including the Metal residency heartbeat that sleeps once its keep-alive
+# runs out. Drop once a transcribe.cpp release carries upstream's patches.
+[patch.crates-io]
+transcribe-cpp = { git = "https://github.com/anomalyco/transcribe.cpp", rev = "bcb639faa4c74a2300ba19e30360cb2355b1663a" }
+transcribe-cpp-sys = { git = "https://github.com/anomalyco/transcribe.cpp", rev = "bcb639faa4c74a2300ba19e30360cb2355b1663a" }

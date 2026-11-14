@@ -107,14 +107,14 @@ impl LinuxTranscriber {
             &path,
             &ModelOptions {
                 backend: Backend::Auto,
-                device: None,
+                ..Default::default()
             },
         )
         .wrap_err_with(|| format!("could not load transcription model from {}", path.display()))?;
         let device = model.device()?;
         let variant = model.variant();
         let architecture = model.arch();
-        let capabilities = model.capabilities();
+        let capabilities = model.capabilities()?;
         let language = crate::gguf_session::validate_gguf_artifact(
             path,
             definition,

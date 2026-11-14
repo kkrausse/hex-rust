@@ -26,10 +26,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &model_path,
         &ModelOptions {
             backend: Backend::Metal,
-            device: None,
+            ..Default::default()
         },
     )?;
-    let caps = model.capabilities();
+    let caps = model.capabilities()?;
     println!(
         "arch={} variant={} supports_streaming={}",
         model.arch(),

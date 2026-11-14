@@ -70,7 +70,7 @@ impl OfflineGgufSession {
             Some(session) => session,
             None => self.model.session()?,
         };
-        let result = session.run(samples, options);
+        let result = keep_repetition_partial(session.run(samples, options));
         drop(session);
         match self.model.session() {
             Ok(session) => {
@@ -85,7 +85,9 @@ impl OfflineGgufSession {
     }
 
     pub(crate) fn supports_streaming(&self) -> bool {
-        self.model.capabilities().supports_streaming
+        self.model
+            .capabilities()
+            .is_ok_and(|capabilities| capabilities.supports_streaming)
     }
 
     /// Run `live` against one stream, then replace the session the same way
@@ -128,3 +130,19 @@ fn stream_options(model: &transcribe_cpp::Model) -> transcribe_cpp::StreamOption
         ..Default::default()
     }
 }
+
+/// transcribe-cpp 0.4 stops a decoder that starts looping and reports the text
+/// before the loop as an error; 0.2 returned the looped text as success. Keep
+/// returning text.
+fn keep_repetition_partial(
+    result: transcribe_cpp::Result<transcribe_cpp::Transcript>,
+) -> transcribe_cpp::Result<transcribe_cpp::Transcript> {
+    match result {
+        Err(transcribe_cpp::Error::OutputRepetition {
+            partial: Some(partial),
+            ..
+        }) => Ok(*partial),
+        result => result,
+    }
+}
+
