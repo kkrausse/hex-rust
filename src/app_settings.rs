@@ -15,6 +15,8 @@ static DOUBLE_TAP_LOCK: AtomicBool = AtomicBool::new(true);
 static LIVE_DICTATION: AtomicBool = AtomicBool::new(true);
 static LIVE_PASS_DICTATION: AtomicBool = AtomicBool::new(true);
 static LIVE_PASSES: OnceLock<RwLock<crate::agreement::LivePasses>> = OnceLock::new();
+static LIVE_TEXT_PASS_DICTATION: AtomicBool = AtomicBool::new(true);
+static LIVE_TEXT_PASSES: OnceLock<RwLock<crate::text_agreement::LiveTextPasses>> = OnceLock::new();
 static DOUBLE_TAP_ONLY: AtomicBool = AtomicBool::new(false);
 static MICROPHONE_POLICY: AtomicU8 = AtomicU8::new(0);
 static CUSTOM_TRANSFORMATIONS_ENABLED: AtomicBool = AtomicBool::new(false);
@@ -547,6 +549,11 @@ pub struct AppSettings {
     pub live_pass_dictation: bool,
     /// How models without native streaming go live.
     pub live_passes: crate::agreement::LivePasses,
+    /// The live switch for models without word times (Cohere), which go
+    /// live by agreement of repeated passes' text.
+    pub live_text_pass_dictation: bool,
+    /// How models without word times go live.
+    pub live_text_passes: crate::text_agreement::LiveTextPasses,
     pub dictation_hotkey: HotkeyBinding,
     #[serde(
         default = "HotkeyBinding::edit_default",
@@ -587,6 +594,8 @@ impl Default for AppSettings {
             live_dictation: true,
             live_pass_dictation: true,
             live_passes: crate::agreement::LivePasses::default(),
+            live_text_pass_dictation: true,
+            live_text_passes: crate::text_agreement::LiveTextPasses::default(),
             dictation_hotkey: HotkeyBinding::default(),
             edit_hotkey: HotkeyBinding::edit_default(),
             paste_last_hotkey: Some(HotkeyBinding::paste_last_default()),
@@ -805,6 +814,11 @@ impl AppSettings {
             .get_or_init(Default::default)
             .write()
             .unwrap_or_else(|error| error.into_inner()) = self.live_passes;
+        LIVE_TEXT_PASS_DICTATION.store(self.live_text_pass_dictation, Ordering::Relaxed);
+        *LIVE_TEXT_PASSES
+            .get_or_init(Default::default)
+            .write()
+            .unwrap_or_else(|error| error.into_inner()) = self.live_text_passes;
         DOUBLE_TAP_ONLY.store(
             self.double_tap_lock && self.double_tap_only && self.dictation_hotkey.key.is_some(),
             Ordering::Relaxed,
@@ -1028,8 +1042,18 @@ pub fn live_dictation(mode: crate::transcription_models::LiveMode) -> bool {
         crate::transcription_models::LiveMode::Passes => {
             LIVE_PASS_DICTATION.load(Ordering::Relaxed)
         }
+        crate::transcription_models::LiveMode::TextPasses => {
+            LIVE_TEXT_PASS_DICTATION.load(Ordering::Relaxed)
+        }
         crate::transcription_models::LiveMode::Unavailable => false,
     }
+}
+
+pub fn live_text_passes() -> crate::text_agreement::LiveTextPasses {
+    *LIVE_TEXT_PASSES
+        .get_or_init(Default::default)
+        .read()
+        .unwrap_or_else(|error| error.into_inner())
 }
 
 pub fn live_passes() -> crate::agreement::LivePasses {

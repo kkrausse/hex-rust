@@ -182,6 +182,9 @@ pub enum LiveMode {
     Native,
     /// Repeated passes over recent audio, committed by agreement.
     Passes,
+    /// Repeated passes over a trailing window for a model without word
+    /// times, committed by agreement of their aligned text.
+    TextPasses,
     /// No word times: text pastes on release.
     Unavailable,
 }
@@ -194,6 +197,7 @@ impl ModelDefinition {
             TranscriptionModelId::ParakeetTdtCtc110m
             | TranscriptionModelId::ParakeetV2
             | TranscriptionModelId::ParakeetV3 => LiveMode::Passes,
+            TranscriptionModelId::CohereTranscribe => LiveMode::TextPasses,
             _ => LiveMode::Unavailable,
         }
     }

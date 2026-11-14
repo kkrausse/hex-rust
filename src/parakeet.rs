@@ -23,6 +23,7 @@ use crate::history::{History, HistoryDraft, HistoryKind};
 use crate::meeting::{self, TranscriptEntry, TranscriptPublication};
 use crate::paste::{PasteMode, Paster};
 use crate::suppression::InputActivity;
+use crate::text_agreement::{CommittedWord, TextAgreement};
 use crate::transcription::WarmTranscriber;
 use crate::transcription_models::{
     TranscriptionModelId, TranscriptionSelection, model_path, validate,
@@ -1041,22 +1042,27 @@ fn run_live_job(
                     })
                     .map_err(|error| error.to_string())
                 }
-                None => {
-                    tracing::info!("selected model cannot stream; live dictation uses batch");
-                    let mut samples = Vec::new();
-                    wait_for_end(&mut |chunk| {
-                        samples.extend_from_slice(chunk);
-                        Ok(())
-                    })
-                    .and_then(|end| {
-                        if end == LiveEnd::Finished {
-                            let text = transcriber.transcribe(std::mem::take(&mut samples))?;
-                            release(text.trim(), true, &mut inserted);
-                        }
-                        Ok(end)
-                    })
-                    .map_err(|error| error.to_string())
-                }
+                None => match transcriber.text_agreement_model() {
+                    Some(model) => run_text_passes(model, &mut wait_for_end, &mut |text, last| {
+                        release(text, last, &mut inserted)
+                    }),
+                    None => {
+                        tracing::info!("selected model cannot stream; live dictation uses batch");
+                        let mut samples = Vec::new();
+                        wait_for_end(&mut |chunk| {
+                            samples.extend_from_slice(chunk);
+                            Ok(())
+                        })
+                        .and_then(|end| {
+                            if end == LiveEnd::Finished {
+                                let text = transcriber.transcribe(std::mem::take(&mut samples))?;
+                                release(text.trim(), true, &mut inserted);
+                            }
+                            Ok(end)
+                        })
+                        .map_err(|error| error.to_string())
+                    }
+                },
             },
         },
     };
@@ -1095,6 +1101,76 @@ fn run_live_job(
             })),
         },
     }
+}
+
+/// Live dictation by text agreement: transcribe the trailing window at most
+/// once per interval (a pass runs on this thread, so a slow one delays the
+/// next instead of queueing behind), release each committed word, and on
+/// release transcribe everything not yet pasted once more.
+fn run_text_passes(
+    model: &mut Parakeet,
+    wait_for_end: &mut impl FnMut(&mut dyn FnMut(&[f32]) -> Result<()>) -> Result<LiveEnd>,
+    release: &mut impl FnMut(&str, bool),
+) -> std::result::Result<LiveEnd, String> {
+    let params = crate::app_settings::live_text_passes();
+    let pass_interval = Duration::from_millis(params.interval_ms.into());
+    let mut agreement = TextAgreement::new(params);
+    let mut samples = Vec::<f32>::new();
+    let mut committed = String::new();
+    let mut last_pass = (Instant::now(), 0usize);
+    let mut passes = 0u32;
+    let push = |committed: &mut String, words: Vec<CommittedWord>| {
+        for word in words {
+            if !committed.is_empty() {
+                committed.push(' ');
+            }
+            committed.push_str(&word.text);
+        }
+    };
+    let audio_ms = |samples: &[f32]| (samples.len() / TRANSCRIPTION_SAMPLES_PER_MS) as i64;
+    let from = |samples: &[f32], start_ms: i64| {
+        (start_ms as usize * TRANSCRIPTION_SAMPLES_PER_MS).min(samples.len())
+    };
+    wait_for_end(&mut |chunk| {
+        samples.extend_from_slice(chunk);
+        if last_pass.0.elapsed() < pass_interval
+            || samples.len() - last_pass.1 < AGREEMENT_MIN_NEW_SAMPLES
+        {
+            return Ok(());
+        }
+        last_pass = (Instant::now(), samples.len());
+        passes += 1;
+        let end_ms = audio_ms(&samples);
+        let start_ms = agreement.window_start_ms(end_ms);
+        let text = model.transcribe_window(&samples[from(&samples, start_ms)..])?;
+        tracing::debug!(
+            start_ms,
+            end_ms,
+            pass_ms = last_pass.0.elapsed().as_millis(),
+            "text agreement pass"
+        );
+        push(&mut committed, agreement.pass(&text, start_ms, end_ms));
+        if !committed.is_empty() {
+            release(&format!("{committed} "), false);
+        }
+        Ok(())
+    })
+    .and_then(|end| {
+        if end == LiveEnd::Finished {
+            let start_ms = agreement.final_start_ms(audio_ms(&samples));
+            samples.extend_from_slice(&[0.0; LIVE_TRAILING_SILENCE_SAMPLES]);
+            passes += 1;
+            let text = model.transcribe_window(&samples[from(&samples, start_ms)..])?;
+            push(
+                &mut committed,
+                agreement.finish(&text, start_ms, audio_ms(&samples)),
+            );
+            release(&committed, true);
+        }
+        tracing::info!(passes, "text agreement dictation ended");
+        Ok(end)
+    })
+    .map_err(|error| error.to_string())
 }
 
 /// Keeps the audio the last live stream was fed, and what it pasted, in
@@ -1508,6 +1584,25 @@ impl Parakeet {
 
     pub(crate) fn has_word_times(&self) -> bool {
         self.options.timestamps == TimestampKind::Word
+    }
+
+    /// Live by text agreement: no native stream, no word times, and a
+    /// catalog model meant for it (Cohere).
+    pub(crate) fn goes_live_by_text(&self) -> bool {
+        !self.supports_streaming()
+            && !self.has_word_times()
+            && self.model_id().is_some_and(|id| {
+                crate::transcription_models::definition(id).live_mode()
+                    == crate::transcription_models::LiveMode::TextPasses
+            })
+    }
+
+    /// Transcribe one live window's text, chunked like a whole clip if it
+    /// exceeds the model's input limit.
+    pub(crate) fn transcribe_window(&mut self, samples: &[f32]) -> Result<String> {
+        let mut samples = samples.to_vec();
+        pad_for_parakeet(&mut samples);
+        self.transcribe(&samples)
     }
 
     /// Transcribe `samples` and return its words with times shifted by

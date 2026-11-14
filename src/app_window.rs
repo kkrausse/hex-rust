@@ -4495,17 +4495,21 @@ impl AppWindow {
     }
 
     /// The live dictation switch, plus the pass settings when the selected
-    /// model goes live by repeated passes.
+    /// model goes live by repeated passes (timed or text).
     fn render_live_settings(&self, mode: LiveMode, cx: &mut Context<Self>) -> Div {
         let enabled = match mode {
             LiveMode::Native => self.settings.live_dictation,
             LiveMode::Passes => self.settings.live_pass_dictation,
+            LiveMode::TextPasses => self.settings.live_text_pass_dictation,
             LiveMode::Unavailable => false,
         };
-        let passes = mode == LiveMode::Passes && enabled;
+        let passes = matches!(mode, LiveMode::Passes | LiveMode::TextPasses) && enabled;
         let description = match mode {
             LiveMode::Native => "Native streaming: words paste as the model commits them",
             LiveMode::Passes => "Repeated passes: words paste once consecutive passes agree",
+            LiveMode::TextPasses => {
+                "Repeated passes over recent audio: words paste once two passes agree on them"
+            }
             LiveMode::Unavailable => "This model has no live mode; text pastes on release",
         };
         let switch = settings_row(
@@ -4521,6 +4525,9 @@ impl AppWindow {
                     LiveMode::Passes => {
                         settings.live_pass_dictation = !settings.live_pass_dictation
                     }
+                    LiveMode::TextPasses => {
+                        settings.live_text_pass_dictation = !settings.live_text_pass_dictation
+                    }
                     LiveMode::Unavailable => {}
                 });
             }),
@@ -4528,7 +4535,6 @@ impl AppWindow {
         if !passes {
             return panel;
         }
-        let live = self.settings.live_passes;
         let picker = |id: &'static str,
                       options: &[(&'static str, u32)],
                       current: u32,
@@ -4548,6 +4554,64 @@ impl AppWindow {
                 }),
             )
         };
+        if mode == LiveMode::TextPasses {
+            let live = self.settings.live_text_passes;
+            return panel
+                .child(settings_row(
+                    "Window",
+                    "Recent audio each pass transcribes again",
+                    picker(
+                        "live-text-window",
+                        &[
+                            ("10 s", 10_000),
+                            ("15 s", 15_000),
+                            ("20 s", 20_000),
+                            ("25 s", 25_000),
+                            ("30 s", 30_000),
+                        ],
+                        live.window_ms,
+                        |settings, value| settings.live_text_passes.window_ms = value,
+                        cx,
+                    ),
+                ))
+                .child(settings_row(
+                    "Pass every",
+                    "How often a pass starts; a slow pass is never queued",
+                    picker(
+                        "live-text-interval",
+                        &[
+                            ("0.5 s", 500),
+                            ("1 s", 1_000),
+                            ("1.5 s", 1_500),
+                            ("2 s", 2_000),
+                        ],
+                        live.interval_ms,
+                        |settings, value| settings.live_text_passes.interval_ms = value,
+                        cx,
+                    ),
+                ))
+                .child(
+                    settings_row(
+                        "Paste delay",
+                        "How far behind the newest audio a word must be to paste",
+                        picker(
+                            "live-text-lag",
+                            &[
+                                ("2 s", 2_000),
+                                ("3 s", 3_000),
+                                ("4 s", 4_000),
+                                ("5 s", 5_000),
+                                ("7 s", 7_000),
+                            ],
+                            live.commit_lag_ms,
+                            |settings, value| settings.live_text_passes.commit_lag_ms = value,
+                            cx,
+                        ),
+                    )
+                    .border_b_0(),
+                );
+        }
+        let live = self.settings.live_passes;
         panel = panel
             .child(settings_row(
                 "Pass every",

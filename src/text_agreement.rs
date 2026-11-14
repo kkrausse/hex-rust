@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 /// aligned against it.
 const OVERLAP_MS: i64 = 2_500;
 /// Hard cap on one pass, under Cohere's 35 s chunk.
-pub const MAX_PASS_MS: i64 = 30_000;
+const MAX_PASS_MS: i64 = 30_000;
 /// Pasted words an alignment looks at.
 const ALIGN_TAIL_WORDS: usize = 16;
 
@@ -67,10 +67,6 @@ impl TextAgreement {
             params,
             ..Self::default()
         }
-    }
-
-    pub fn committed(&self) -> &[CommittedWord] {
-        &self.committed
     }
 
     /// Where the next pass should begin, in ms, once `end_ms` of audio has
@@ -162,7 +158,8 @@ impl TextAgreement {
         if self.committed_end_ms <= start_ms {
             return lenient.then_some(0);
         }
-        let tail: Vec<String> = self.committed[self.committed.len().saturating_sub(ALIGN_TAIL_WORDS)..]
+        let tail: Vec<String> = self.committed
+            [self.committed.len().saturating_sub(ALIGN_TAIL_WORDS)..]
             .iter()
             .map(|word| key(&word.text))
             .collect();
@@ -276,7 +273,10 @@ fn timed_words(text: &str, start_ms: i64, end_ms: i64) -> Vec<PassWord> {
             _ => words.push((token.to_string(), token_key)),
         }
     }
-    let total: usize = words.iter().map(|(_, key)| key.chars().count().max(1)).sum();
+    let total: usize = words
+        .iter()
+        .map(|(_, key)| key.chars().count().max(1))
+        .sum();
     let mut through = 0;
     words
         .into_iter()

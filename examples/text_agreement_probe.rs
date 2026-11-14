@@ -63,6 +63,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut agreement = TextAgreement::new(params);
     let mut times = Vec::new();
     let mut lags = Vec::<i64>::new();
+    let mut live = Vec::<String>::new();
     let mut end = 16_000usize;
     while end <= pcm.len() {
         let start_ms = agreement.window_start_ms((end / 16) as i64);
@@ -70,6 +71,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         times.push((ms, (end / 16) as i64 - start_ms));
         let at_ms = (end / 16) as i64;
         let committed = agreement.pass(&text, start_ms, at_ms);
+        live.extend(committed.iter().map(|w| w.text.clone()));
         if !committed.is_empty() {
             let words: Vec<_> = committed.iter().map(|w| w.text.as_str()).collect();
             let lag: Vec<i64> = committed.iter().map(|w| at_ms - w.end_ms).collect();
@@ -100,11 +102,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         (tail.len() / 16) as f64 / 1000.0 - start_ms as f64 / 1000.0,
         rest.join(" ")
     );
-    let live: Vec<_> = agreement
-        .committed()
-        .iter()
-        .map(|w| w.text.as_str())
-        .collect();
+    live.extend(rest.iter().cloned());
     let live = live.join(" ");
     let (whole, whole_ms) = transcribe(&tail)?;
     times.sort();
@@ -159,7 +157,11 @@ fn lcs(a: &[String], b: &[String]) -> usize {
         let mut prev = 0;
         for (j, y) in b.iter().enumerate() {
             let here = row[j + 1];
-            row[j + 1] = if x == y { prev + 1 } else { row[j + 1].max(row[j]) };
+            row[j + 1] = if x == y {
+                prev + 1
+            } else {
+                row[j + 1].max(row[j])
+            };
             prev = here;
         }
     }
