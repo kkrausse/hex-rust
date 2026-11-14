@@ -59,6 +59,11 @@ pub struct TextAgreement {
     /// The previous pass's words after the committed point.
     previous: Vec<String>,
     committed_end_ms: i64,
+    /// Passes in a row that could not be aligned. The estimated end of the
+    /// pasted text can sit seconds late (word times are spread evenly, so a
+    /// pause throws them off); each miss reaches one more overlap further
+    /// back so the next pass contains pasted words again.
+    misses: i64,
 }
 
 impl TextAgreement {
@@ -75,7 +80,7 @@ impl TextAgreement {
     pub fn window_start_ms(&self, end_ms: i64) -> i64 {
         let window = i64::from(self.params.window_ms).min(MAX_PASS_MS);
         (end_ms - window)
-            .min(self.committed_end_ms - OVERLAP_MS)
+            .min(self.committed_end_ms - self.overlap_ms())
             .max(end_ms - MAX_PASS_MS)
             .max(0)
     }
@@ -85,8 +90,12 @@ impl TextAgreement {
     /// caller chunks it if it exceeds the model's input limit.
     pub fn final_start_ms(&self, end_ms: i64) -> i64 {
         (end_ms - i64::from(self.params.window_ms))
-            .min(self.committed_end_ms - OVERLAP_MS)
+            .min(self.committed_end_ms - self.overlap_ms())
             .max(0)
+    }
+
+    fn overlap_ms(&self) -> i64 {
+        OVERLAP_MS * (1 + self.misses)
     }
 
     /// One pass's `text` over the audio from `start_ms` to `end_ms`, in ms
@@ -96,8 +105,15 @@ impl TextAgreement {
         let Some(aligned) = self.align(&words, start_ms, false) else {
             tracing::debug!(start_ms, end_ms, "text pass did not align; nothing commits");
             self.previous.clear();
+            self.misses += 1;
             return Vec::new();
         };
+        self.misses = 0;
+        // This pass's estimate of where the pasted text ends replaces the
+        // older one, so an estimate thrown late by a pause does not persist.
+        if aligned > 0 {
+            self.committed_end_ms = words[aligned - 1].end_ms;
+        }
         let pending = &words[aligned..];
         let lag = i64::from(self.params.commit_lag_ms);
         let ready = pending

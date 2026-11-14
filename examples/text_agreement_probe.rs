@@ -84,6 +84,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 lag.iter().max().unwrap(),
                 words.join(" ")
             );
+        } else if std::env::var_os("PROBE_VERBOSE").is_some() {
+            let pasted = live[live.len().saturating_sub(8)..].join(" ");
+            println!(
+                "audio {at_ms:>5} ms (window {:>4.1} s): NOTHING | pasted tail: …{pasted} | pass: {text}",
+                (at_ms - start_ms) as f64 / 1000.0,
+            );
         }
         // The next pass starts on the interval, or right after a slow pass.
         end += (ms.max(u128::from(params.interval_ms)) as usize) * 16;
