@@ -12,7 +12,7 @@ use crate::recording_environment::{RecordingEnvironmentController, RecordingEnvi
 const VOICE_PRE_ROLL_DURATION: Duration = Duration::from_secs(1);
 const TIMELINE_BUFFER_DURATION: Duration = Duration::from_secs(10);
 const PRE_ROLL_DURATION: Duration = Duration::from_millis(450);
-pub const MINIMUM_HOLD_DURATION: Duration = Duration::from_millis(300);
+pub const MINIMUM_HOLD_DURATION: Duration = Duration::from_millis(500);
 const MINIMUM_PARAKEET_DURATION: Duration = Duration::from_millis(1500);
 const INITIAL_RECORDING_CAPACITY: Duration = Duration::from_secs(10);
 const PARAKEET_SAMPLE_RATE: u32 = 16_000;
