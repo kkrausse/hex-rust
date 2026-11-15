@@ -57,7 +57,7 @@ const MAX_TRANSFORMATION_TEXT_BYTES: usize = 48 * 1024;
 const TRANSFORMATION_TIMEOUT: Duration = Duration::from_secs(10);
 pub(crate) const LOWERCASE_TRANSFORMATION_ID: &str = "lowercase";
 const SPONGEBOB_TRANSFORMATION_ID: &str = "spongebob-case";
-const NO_TRAILING_PUNCTUATION_TRANSFORMATION_ID: &str = "no-trailing-punctuation";
+pub(crate) const NO_TRAILING_PUNCTUATION_TRANSFORMATION_ID: &str = "no-trailing-punctuation";
 
 struct BuiltinTransformation {
     id: &'static str,
@@ -790,7 +790,7 @@ const TRAILING_PUNCTUATION: &[char] = &[
     '\u{ff0c}', '\u{ff1b}', '\u{ff1a}',
 ];
 
-fn remove_trailing_punctuation(text: &str) -> String {
+pub(crate) fn remove_trailing_punctuation(text: &str) -> String {
     let body = text.trim_end();
     let trailing_whitespace = &text[body.len()..];
     let mut output = body.trim_end_matches(TRAILING_PUNCTUATION).to_string();

@@ -929,7 +929,7 @@ fn run_live_job(
         if piece.trim().is_empty() {
             return;
         }
-        let text = profiles.live_piece(piece, &job.context);
+        let text = profiles.live_piece(piece, &job.context, final_text);
         inserted.push_str(&text);
         let _ = output.send(OutputJob::LivePaste {
             job_id: job.job_id,

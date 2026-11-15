@@ -176,6 +176,9 @@ pub struct Profiles {
     contextual: Vec<ContextualProfile>,
 }
 
+const NO_TRAILING_PUNCTUATION: &str =
+    crate::personal_commands::NO_TRAILING_PUNCTUATION_TRANSFORMATION_ID;
+
 impl Profiles {
     pub fn new(default: Profile) -> Self {
         Self {
@@ -222,14 +225,19 @@ impl Profiles {
     }
 
     /// Apply the selected profile's replacements, then lowercase if the
-    /// profile asks for it. Used on live pieces, so only per-piece-safe steps.
-    pub fn live_piece(&self, text: &str, context: &ContextSnapshot) -> String {
-        let text = self.select(context).replacements.replace(text);
+    /// profile asks for it. Used on live pieces, so only per-piece-safe steps:
+    /// "No trailing punctuation" applies to the `last` piece, which ends the
+    /// dictation.
+    pub fn live_piece(&self, text: &str, context: &ContextSnapshot, last: bool) -> String {
+        let profile = self.select(context);
+        let mut text = profile.replacements.replace(text);
         if self.lowercases(context) {
-            text.to_lowercase()
-        } else {
-            text
+            text = text.to_lowercase();
         }
+        if last && profile.transformations.iter().any(|id| id == NO_TRAILING_PUNCTUATION) {
+            text = crate::personal_commands::remove_trailing_punctuation(&text);
+        }
+        text
     }
 
     pub fn lowercases(&self, context: &ContextSnapshot) -> bool {
@@ -240,14 +248,14 @@ impl Profiles {
     }
 
     /// Whether this context can stream: AI rewrites and every transformation
-    /// but lowercase need the whole transcript.
+    /// but lowercase and "No trailing punctuation" need the whole transcript.
     pub fn streams(&self, context: &ContextSnapshot) -> bool {
         let profile = self.select(context);
         !profile.ai_enabled
-            && profile
-                .transformations
-                .iter()
-                .all(|id| id == crate::personal_commands::LOWERCASE_TRANSFORMATION_ID)
+            && profile.transformations.iter().all(|id| {
+                id == crate::personal_commands::LOWERCASE_TRANSFORMATION_ID
+                    || id == NO_TRAILING_PUNCTUATION
+            })
     }
 
     pub fn processes(&self, context: &ContextSnapshot) -> bool {
